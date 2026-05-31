@@ -1,0 +1,63 @@
+/* Shopify Inter font is loaded via root.jsx CDN link */
+
+/* Mono font for tracking numbers and IDs only */
+.mono-text {
+  font-family: 'JetBrains Mono', 'Courier New', monospace;
+  font-size: 0.875em;
+}
+
+/* Validation shake animation for booking form */
+@keyframes shake {
+  0%, 100% { transform: translateX(0); }
+  25% { transform: translateX(-4px); }
+  75% { transform: translateX(4px); }
+}
+
+.shake-error {
+  animation: shake 0.4s ease-in-out;
+}
+
+.error-text {
+  color: var(--p-color-text-critical, #d72c0d);
+  font-size: 0.75rem;
+  margin-top: 4px;
+  display: block;
+}
+
+/* Modal backdrop for booking confirmation */
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background-color: rgba(0, 0, 0, 0.5);
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  z-index: 1000;
+}
+
+.modal-content {
+  background-color: var(--p-color-bg-surface, #fff);
+  border-radius: 12px;
+  padding: 24px;
+  width: 90%;
+  max-width: 560px;
+  box-shadow: 0 20px 40px rgba(0,0,0,0.15);
+}
+
+/* Input group for booking form */
+.premium-input-group {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 12px;
+}
+
+.grid-2-col {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 16px;
+}
+
+@media (max-width: 768px) {
+  .grid-2-col { grid-template-columns: 1fr; }
+}

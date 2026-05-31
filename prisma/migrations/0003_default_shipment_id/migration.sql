@@ -1,0 +1,1 @@
+ALTER TABLE "Settings" ADD COLUMN "defaultShipmentId" INTEGER NOT NULL DEFAULT 1;

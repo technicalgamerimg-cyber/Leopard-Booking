@@ -1,0 +1,68 @@
+# Learn more about configuring your app at https://shopify.dev/docs/apps/tools/cli/configuration
+
+client_id = "375e36f1941551d648b389d408b06d6b"
+name = "Leopard Booking"
+application_url = "https://capture-headset-nutten-nicholas.trycloudflare.com"
+embedded = true
+handle = "leopard-booking-1"
+
+[build]
+automatically_update_urls_on_dev = true
+
+[webhooks]
+api_version = "2025-10"
+
+  [webhooks.privacy_compliance]
+  customer_deletion_url = "/webhooks/customers/redact"
+  customer_data_request_url = "/webhooks/customers/data_request"
+  shop_deletion_url = "/webhooks/shop/redact"
+
+  [[webhooks.subscriptions]]
+  uri = "/webhooks/app/scopes_update"
+  topics = [ "app/scopes_update" ]
+
+  [[webhooks.subscriptions]]
+  uri = "/webhooks/app/uninstalled"
+  topics = [ "app/uninstalled" ]
+
+  [[webhooks.subscriptions]]
+  uri = "/webhooks/fulfillments/create"
+  topics = [ "fulfillments/create" ]
+
+  [[webhooks.subscriptions]]
+  uri = "/webhooks/fulfillments/update"
+  topics = [ "fulfillments/update" ]
+
+  [[webhooks.subscriptions]]
+  uri = "/webhooks/orders/cancelled"
+  topics = [ "orders/cancelled" ]
+
+  [[webhooks.subscriptions]]
+  uri = "/webhooks/orders/create"
+  topics = [ "orders/create" ]
+
+  [[webhooks.subscriptions]]
+  uri = "/webhooks/orders/delete"
+  topics = [ "orders/delete" ]
+
+  [[webhooks.subscriptions]]
+  uri = "/webhooks/orders/fulfilled"
+  topics = [ "orders/fulfilled" ]
+
+  [[webhooks.subscriptions]]
+  uri = "/webhooks/orders/paid"
+  topics = [ "orders/paid" ]
+
+  [[webhooks.subscriptions]]
+  uri = "/webhooks/orders/updated"
+  topics = [ "orders/updated" ]
+
+[access_scopes]
+scopes = "read_orders,write_orders,read_products,read_customers,read_fulfillments,write_fulfillments,read_merchant_managed_fulfillment_orders,write_merchant_managed_fulfillment_orders,read_locations"
+
+[auth]
+redirect_urls = [
+  "https://capture-headset-nutten-nicholas.trycloudflare.com/auth/callback",
+  "https://capture-headset-nutten-nicholas.trycloudflare.com/auth/shopify/callback",
+  "https://capture-headset-nutten-nicholas.trycloudflare.com/api/auth/callback"
+]

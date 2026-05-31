@@ -1,0 +1,230 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+// Note that some adapters may set a maximum length for the String type by default, please ensure your strings are long
+// enough when changing adapters.
+// See https://www.prisma.io/docs/orm/reference/prisma-schema-reference#string for more information
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum LeopardEnvironment {
+  staging
+  production
+}
+
+enum ShipmentStatus {
+  PENDING
+  BOOKED
+  IN_TRANSIT
+  DELIVERED
+  RETURNED
+  CANCELLED
+  EXCEPTION
+}
+
+enum LoadsheetStatus {
+  generated
+  downloaded
+}
+
+enum WebhookStatus {
+  received
+  processed
+  failed
+  dead_letter
+}
+
+enum ShipmentEvent {
+  BOOKED
+  CANCELLED
+  STATUS_CHANGE
+  ERROR
+}
+
+model Session {
+  id            String    @id
+  shop          String
+  state         String
+  isOnline      Boolean   @default(false)
+  scope         String?
+  expires       DateTime?
+  accessToken   String
+  userId        BigInt?
+  firstName     String?
+  lastName      String?
+  email         String?
+  accountOwner  Boolean   @default(false)
+  locale        String?
+  collaborator  Boolean?  @default(false)
+  emailVerified Boolean?  @default(false)
+  refreshToken        String?
+  refreshTokenExpires DateTime?
+}
+
+model Store {
+  id            String    @id @default(cuid())
+  shopDomain    String    @unique
+  accessToken   String
+  scopes        String?
+  isActive      Boolean   @default(true)
+  installedAt   DateTime  @default(now())
+  uninstalledAt DateTime?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  settings    Settings?
+  shipments   Shipment[]
+  loadsheets  Loadsheet[]
+  webhookLogs WebhookLog[]
+  apiLogs     ApiLog[]
+  cities      CityCache[]
+}
+
+model Settings {
+  id                          String             @id @default(cuid())
+  storeId                     String             @unique
+  store                       Store              @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  leopardApiKey               String?
+  leopardApiPassword          String?
+  leopardEnvironment          LeopardEnvironment @default(staging)
+  originCityId                Int?
+  shipperName                 String?
+  shipperPhone                String?
+  shipperEmail                String?
+  shipperAddress              String?
+  defaultShipmentId           Int                @default(1)
+  defaultWeightGrams          Int                @default(1000)
+  defaultSpecialInstructions  String?
+  fulfillmentWritebackEnabled Boolean            @default(true)
+  codGatewayKeywords          String?
+  createdAt                   DateTime           @default(now())
+  updatedAt                   DateTime           @updatedAt
+}
+
+model Shipment {
+  id                  String          @id @default(cuid())
+  storeId             String
+  store               Store           @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  shopifyOrderId      String
+  shopifyOrderName    String
+  cnNumber            String?
+  slipLink            String?
+  bookedPacketOrderId String?
+  status              ShipmentStatus  @default(PENDING)
+  leopardStatusRaw    String?
+  codAmount           Int             @default(0)
+  weightGrams         Int
+  noOfPieces          Int             @default(1)
+  originCityId        Int?
+  destinationCityId   Int?
+  consigneeName       String
+  consigneePhone      String
+  consigneeAddress    String
+  lastError           String?
+  bookedAt            DateTime?
+  deliveredAt         DateTime?
+  cancelledAt         DateTime?
+  createdAt           DateTime        @default(now())
+  updatedAt           DateTime        @updatedAt
+
+  logs       ShipmentLog[]
+  loadsheets LoadsheetShipment[]
+
+  @@unique([storeId, shopifyOrderId])
+  @@unique([storeId, cnNumber])
+  @@index([storeId, status])
+  @@index([storeId, bookedAt])
+}
+
+model Loadsheet {
+  id          String              @id @default(cuid())
+  storeId     String
+  store       Store               @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  loadSheetId String
+  courierName String?
+  courierCode String?
+  cnCount     Int                 @default(0)
+  status      LoadsheetStatus     @default(generated)
+  createdAt   DateTime            @default(now())
+  updatedAt   DateTime            @updatedAt
+  shipments   LoadsheetShipment[]
+
+  @@index([storeId])
+  @@index([storeId, loadSheetId])
+}
+
+model LoadsheetShipment {
+  id          String    @id @default(cuid())
+  loadsheetId String
+  shipmentId  String
+  loadsheet   Loadsheet @relation(fields: [loadsheetId], references: [id], onDelete: Cascade)
+  shipment    Shipment  @relation(fields: [shipmentId], references: [id], onDelete: Cascade)
+
+  @@unique([loadsheetId, shipmentId])
+}
+
+model ShipmentLog {
+  id         String        @id @default(cuid())
+  shipmentId String
+  shipment   Shipment      @relation(fields: [shipmentId], references: [id], onDelete: Cascade)
+  eventType  ShipmentEvent
+  fromStatus String?
+  toStatus   String?
+  message    String?
+  createdAt  DateTime      @default(now())
+
+  @@index([shipmentId])
+  @@index([createdAt])
+}
+
+model WebhookLog {
+  id               String        @id @default(cuid())
+  storeId          String?
+  store            Store?        @relation(fields: [storeId], references: [id], onDelete: SetNull)
+  topic            String
+  hmacValid        Boolean
+  payloadDigest    String
+  processingStatus WebhookStatus @default(received)
+  error            String?
+  createdAt        DateTime      @default(now())
+
+  @@index([createdAt])
+}
+
+model ApiLog {
+  id            String   @id @default(cuid())
+  storeId       String?
+  store         Store?   @relation(fields: [storeId], references: [id], onDelete: SetNull)
+  endpoint      String
+  httpStatus    Int?
+  leopardStatus Int?
+  latencyMs     Int
+  retryCount    Int      @default(0)
+  success       Boolean
+  error         String?
+  createdAt     DateTime @default(now())
+
+  @@index([storeId])
+  @@index([createdAt])
+}
+
+model CityCache {
+  id                 String   @id @default(cuid())
+  storeId            String
+  store              Store    @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  leopardCityId      Int
+  name               String
+  nameNormalized     String
+  allowAsOrigin      Boolean  @default(true)
+  allowAsDestination Boolean  @default(true)
+  refreshedAt        DateTime @default(now())
+
+  @@index([storeId, nameNormalized])
+  @@unique([storeId, leopardCityId])
+}
