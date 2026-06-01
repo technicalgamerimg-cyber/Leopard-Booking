@@ -105,7 +105,9 @@ export async function saveSettings(storeId, formData) {
     defaultSpecialInstructions: formData.has("defaultSpecialInstructions")
       ? normalizeString(formData.get("defaultSpecialInstructions")) || null
       : current.defaultSpecialInstructions,
-    fulfillmentWritebackEnabled: true,
+    fulfillmentWritebackEnabled: formData.has("fulfillmentWritebackEnabled")
+      ? formData.get("fulfillmentWritebackEnabled") === "on"
+      : current.fulfillmentWritebackEnabled,
     codGatewayKeywords: formData.has("codGatewayKeywords")
       ? normalizeString(formData.get("codGatewayKeywords")) || null
       : current.codGatewayKeywords,
@@ -114,13 +116,10 @@ export async function saveSettings(storeId, formData) {
   if (apiKey) data.leopardApiKey = encryptSecret(apiKey);
   if (apiPassword) data.leopardApiPassword = encryptSecret(apiPassword);
 
-  const savedAny = formData.has("section") ? formData.get("section") : "all";
-
   await db.settings.update({ where: { storeId }, data });
 
   return {
     ok: true,
-    section: savedAny,
     message:
       current.hasCredentials || apiKey || apiPassword
         ? "Settings saved."

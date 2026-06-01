@@ -26,7 +26,7 @@ export const action = async ({ request }) => {
 
     const codKeywords = getCodKeywords(store.settings);
     const gatewayText = (order.payment_gateway_names ?? []).join(" ").toLowerCase();
-    const isCod = Boolean(gatewayText) && codKeywords.some((kw) => gatewayText.includes(kw));
+    const isCod = !gatewayText || codKeywords.some((kw) => kw && gatewayText.includes(kw));
     const totalAmount = parseFloat(order.current_total_price ?? order.total_price ?? "0");
 
     await db.shipment.update({

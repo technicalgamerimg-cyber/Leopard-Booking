@@ -48,7 +48,6 @@ export const action = async ({ request }) => {
   return saveSettings(store.id, formData);
 };
 
-// ── Toggle component ──────────────────────────────────────────────────────────
 function Toggle({ checked, onChange, label, description }) {
   return (
     <div style={{ display: "flex", alignItems: "flex-start", gap: 12 }}>
@@ -86,7 +85,6 @@ function Toggle({ checked, onChange, label, description }) {
   );
 }
 
-// ── Section card wrapper ───────────────────────────────────────────────────────
 function SettingsCard({ title, subtitle, children, danger }) {
   return (
     <div style={{
@@ -116,13 +114,12 @@ function StatusDot({ ok, label }) {
   );
 }
 
-// ── Main page ─────────────────────────────────────────────────────────────────
-
 export default function Settings() {
   const { settings, originCities, cityStats } = useLoaderData();
-  const credFetcher    = useFetcher();
+  const credFetcher     = useFetcher();
+  const testFetcher     = useFetcher();
   const defaultsFetcher = useFetcher();
-  const cityFetcher    = useFetcher();
+  const cityFetcher     = useFetcher();
   const shopify = useAppBridge();
 
   const [clearConfirm, setClearConfirm] = useState(false);
@@ -130,6 +127,7 @@ export default function Settings() {
   const [savedSection, setSavedSection] = useState(null);
 
   const credBusy     = credFetcher.state !== "idle";
+  const testBusy     = testFetcher.state !== "idle";
   const defaultsBusy = defaultsFetcher.state !== "idle";
   const cityBusy     = cityFetcher.state !== "idle";
 
@@ -139,6 +137,10 @@ export default function Settings() {
     if (credFetcher.data?.message) shopify.toast.show(credFetcher.data.message, { isError: !credFetcher.data.ok });
     if (credFetcher.data?.ok) { setSavedSection("cred"); setTimeout(() => setSavedSection(null), 3000); }
   }, [credFetcher.data, shopify]);
+
+  useEffect(() => {
+    if (testFetcher.data?.message) shopify.toast.show(testFetcher.data.message, { isError: !testFetcher.data.ok });
+  }, [testFetcher.data, shopify]);
 
   useEffect(() => {
     if (defaultsFetcher.data?.message) shopify.toast.show(defaultsFetcher.data.message, { isError: !defaultsFetcher.data.ok });
@@ -195,6 +197,7 @@ export default function Settings() {
             )}
           </div>
 
+          {/* Save credentials form */}
           <credFetcher.Form method="post">
             <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
               <s-select
@@ -223,21 +226,32 @@ export default function Settings() {
               />
 
               <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-                <s-button type="submit" variant="primary" disabled={credBusy} loading={credBusy && !credFetcher.formData?.get("intent")}>
+                <s-button type="submit" variant="primary" disabled={credBusy} loading={credBusy}>
                   Save credentials
                 </s-button>
-                <credFetcher.Form method="post" style={{ display: "contents" }}>
-                  <input type="hidden" name="intent" value="test" />
-                  <s-button type="submit" disabled={credBusy || !settings.hasCredentials} loading={credBusy && credFetcher.formData?.get("intent") === "test"}>
-                    Test connection
-                  </s-button>
-                </credFetcher.Form>
                 {savedSection === "cred" && (
                   <span style={{ fontSize: 13, color: "#3d8b40", fontWeight: 600 }}>✓ Saved</span>
                 )}
               </div>
             </div>
           </credFetcher.Form>
+
+          {/* Test connection — separate fetcher so it doesn't share state with save */}
+          <div style={{ marginTop: 12, paddingTop: 12, borderTop: "1px solid #f1f2f4" }}>
+            <testFetcher.Form method="post" style={{ display: "contents" }}>
+              <input type="hidden" name="intent" value="test" />
+              <s-button
+                type="submit"
+                disabled={testBusy || !settings.hasCredentials}
+                loading={testBusy}
+              >
+                Test connection
+              </s-button>
+            </testFetcher.Form>
+            {!settings.hasCredentials && (
+              <div style={{ fontSize: 12, color: "#8c9196", marginTop: 6 }}>Save credentials above before testing.</div>
+            )}
+          </div>
         </SettingsCard>
       </s-section>
 
@@ -275,13 +289,12 @@ export default function Settings() {
       {/* ── Shipment defaults ── */}
       <s-section heading="Booking defaults" id="defaults">
         <SettingsCard
-          title="Shipper &amp; booking defaults"
+          title="Shipper & booking defaults"
           subtitle="These values pre-fill every booking. Merchants can override weight, COD, and instructions per order."
         >
           <defaultsFetcher.Form method="post">
             <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
 
-              {/* Origin city */}
               {originCities.length > 0 ? (
                 <s-select
                   label="Origin city"
@@ -303,7 +316,6 @@ export default function Settings() {
                 />
               )}
 
-              {/* Shipper info */}
               <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 12 }}>
                 <s-text-field label="Shipper name" name="shipperName" defaultValue={settings.shipperName || ""} helpText="Your business name as it appears on the waybill." />
                 <s-text-field label="Shipper phone" name="shipperPhone" defaultValue={settings.shipperPhone || ""} />
@@ -311,7 +323,6 @@ export default function Settings() {
               </div>
               <s-text-field label="Shipper address" name="shipperAddress" defaultValue={settings.shipperAddress || ""} helpText="Your dispatch warehouse or office address." />
 
-              {/* Package defaults */}
               <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 12 }}>
                 <s-text-field
                   label="Default packet weight (grams)"
@@ -323,7 +334,7 @@ export default function Settings() {
                   label="Leopards service ID"
                   name="defaultShipmentId"
                   defaultValue={settings.defaultShipmentId || 1}
-                  helpText="Your assigned Leopards shipment/service type. Most COD accounts use 1. Check your Leopards merchant portal if unsure."
+                  helpText="Your assigned Leopards shipment/service type. Most COD accounts use 1."
                 />
               </div>
               <s-text-field
@@ -336,10 +347,9 @@ export default function Settings() {
                 label="COD gateway keywords"
                 name="codGatewayKeywords"
                 defaultValue={settings.codGatewayKeywords}
-                helpText="Comma-separated Shopify payment gateway names treated as COD. E.g. 'cod, cash on delivery'. Orders with online gateways (Stripe, Visa, etc.) are automatically marked prepaid."
+                helpText="Comma-separated Shopify payment gateway names treated as COD. E.g. 'cod, cash on delivery'."
               />
 
-              {/* Fulfillment writeback toggle */}
               <div style={{ paddingTop: 4 }}>
                 <Toggle
                   checked={writeback}

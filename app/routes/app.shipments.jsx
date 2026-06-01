@@ -1,8 +1,10 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import {
+  Form,
   useFetcher,
   useLoaderData,
   useNavigation,
+  useRevalidator,
   useRouteError,
 } from "react-router";
 import { useAppBridge } from "@shopify/app-bridge-react";
@@ -17,8 +19,6 @@ import {
 } from "../services/shipment.server";
 import { batchResolveCityNames } from "../services/city.server";
 import db from "../db.server";
-
-// ── Constants ────────────────────────────────────────────────────────────────
 
 const ALL_STATUSES = ["PENDING", "BOOKED", "IN_TRANSIT", "DELIVERED", "RETURNED", "CANCELLED", "EXCEPTION"];
 
@@ -37,8 +37,6 @@ const TERMINAL_STATUSES = ["DELIVERED", "CANCELLED", "RETURNED"];
 function daysAgoYMD(days) {
   return new Date(Date.now() - days * 86_400_000).toISOString().slice(0, 10);
 }
-
-// ── Loader ───────────────────────────────────────────────────────────────────
 
 export const loader = async ({ request }) => {
   const { session } = await authenticate.admin(request);
@@ -92,8 +90,6 @@ export const loader = async ({ request }) => {
   };
 };
 
-// ── Action ───────────────────────────────────────────────────────────────────
-
 export const action = async ({ request }) => {
   const { session } = await authenticate.admin(request);
   const store = await ensureStore(session);
@@ -103,8 +99,8 @@ export const action = async ({ request }) => {
   const cnNumbers = String(formData.get("cnNumbers") ?? "")
     .split(",").map((v) => v.trim()).filter(Boolean);
 
-  if (intent === "refresh")        return { ...await refreshShipmentStatuses(store.id, cnNumbers),    intent };
-  if (intent === "refreshAll")     return { ...await refreshShipmentStatuses(store.id, []),           intent };
+  if (intent === "refresh")    return { ...await refreshShipmentStatuses(store.id, cnNumbers),  intent };
+  if (intent === "refreshAll") return { ...await refreshShipmentStatuses(store.id, []),         intent };
   if (intent === "refreshByDate") {
     const fromDate = String(formData.get("fromDate") ?? "").trim();
     const toDate   = String(formData.get("toDate")   ?? "").trim();
@@ -116,8 +112,6 @@ export const action = async ({ request }) => {
   }
   return { ok: false, message: "Unknown action.", intent };
 };
-
-// ── Components ───────────────────────────────────────────────────────────────
 
 function StatusPill({ status }) {
   const s = STATUS_STYLES[status] || { dot: "#8c9196", bg: "#f6f6f7", text: "#444750", label: status };
@@ -137,41 +131,43 @@ function buildPageQuery({ status, query, page }) {
   return p.toString();
 }
 
-// ── Page ─────────────────────────────────────────────────────────────────────
-
 export default function Shipments() {
   const {
     shipments, status, query, page, pageCount, total, perPage,
-    cityNames, statusCounts,
+    cityNames, statusCounts, defaultFromDate, defaultToDate,
   } = useLoaderData();
 
   const fetcher = useFetcher();
   const navigation = useNavigation();
+  const revalidator = useRevalidator();
   const shopify = useAppBridge();
 
-  const [cancelTarget, setCancelTarget]       = useState(null);
-  const [selectedCns, setSelectedCns]         = useState(() => new Set());
+  const [cancelTarget, setCancelTarget]             = useState(null);
+  const [selectedCns, setSelectedCns]               = useState(() => new Set());
   const [batchCancelConfirm, setBatchCancelConfirm] = useState(false);
-  const [showSyncPanel, setShowSyncPanel]     = useState(false);
-  const [fromDate, setFromDate]               = useState(useLoaderData().defaultFromDate);
-  const [toDate, setToDate]                   = useState(useLoaderData().defaultToDate);
+  const [showSyncPanel, setShowSyncPanel]           = useState(false);
+  const [fromDate, setFromDate]                     = useState(defaultFromDate);
+  const [toDate, setToDate]                         = useState(defaultToDate);
 
-  const loading       = navigation.state === "loading";
-  const submittingCn  = fetcher.state !== "idle" ? fetcher.formData?.get("cnNumbers") : null;
-  const isRefreshAll  = fetcher.state !== "idle" && fetcher.formData?.get("intent") === "refreshAll";
+  const loading         = navigation.state === "loading";
+  const submittingCn    = fetcher.state !== "idle" ? fetcher.formData?.get("cnNumbers") : null;
+  const isRefreshAll    = fetcher.state !== "idle" && fetcher.formData?.get("intent") === "refreshAll";
   const isRefreshByDate = fetcher.state !== "idle" && fetcher.formData?.get("intent") === "refreshByDate";
-  const isBatchCancel = fetcher.state !== "idle" && fetcher.formData?.get("intent") === "cancelBatch";
+  const isBatchCancel   = fetcher.state !== "idle" && fetcher.formData?.get("intent") === "cancelBatch";
 
   useEffect(() => {
-    if (fetcher.data?.message) {
+    if (!fetcher.data) return;
+    if (fetcher.data.message) {
       shopify.toast.show(fetcher.data.message, { isError: !fetcher.data.ok });
     }
-    if (fetcher.data?.ok) {
-      const intent = fetcher.data.intent ?? fetcher.formData?.get("intent");
+    if (fetcher.data.ok) {
+      const intent = fetcher.data.intent;
+      // Revalidate loader so the table shows fresh statuses after any successful action.
+      revalidator.revalidate();
       if (intent === "cancelBatch") { setSelectedCns(new Set()); setBatchCancelConfirm(false); }
       if (intent === "cancel")      setCancelTarget(null);
     }
-  }, [fetcher.data, fetcher.formData, shopify]);
+  }, [fetcher.data, shopify]); // eslint-disable-line react-hooks/exhaustive-deps
 
   function toggleCn(cn) {
     setSelectedCns((prev) => { const n = new Set(prev); n.has(cn) ? n.delete(cn) : n.add(cn); return n; });
@@ -224,8 +220,8 @@ export default function Shipments() {
           })}
         </div>
 
-        {/* Search row */}
-        <fetcher.Form method="get" style={{ display: "contents" }}>
+        {/* Search row — plain Form (GET) so it never shares state with the POST fetcher */}
+        <Form method="get" style={{ display: "contents" }}>
           <input type="hidden" name="status" value={status} />
           <div style={{ display: "flex", gap: 10, alignItems: "flex-end", flexWrap: "wrap" }}>
             <div style={{ flex: "1 1 260px" }}>
@@ -240,10 +236,10 @@ export default function Shipments() {
             {(status || query) && <s-button href="/app/shipments">Clear</s-button>}
             <s-button href={exportHref}>Export CSV</s-button>
           </div>
-        </fetcher.Form>
+        </Form>
       </s-section>
 
-      {/* ── Sync tools (collapsible) ── */}
+      {/* ── Sync tools ── */}
       <s-section>
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 10 }}>
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>

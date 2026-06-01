@@ -210,12 +210,20 @@ export async function refreshShipmentStatuses(storeId, cnNumbers = []) {
   const CHUNK_SIZE = 50;
   const allCns = shipments.map((s) => s.cnNumber);
   const allPackets = [];
+  const chunkErrors = [];
 
   for (let i = 0; i < allCns.length; i += CHUNK_SIZE) {
     const chunk = allCns.slice(i, i + CHUNK_SIZE);
     const result = await client.trackBookedPacket(chunk);
-    if (!result.ok) return result;
+    if (!result.ok) {
+      chunkErrors.push(result.message ?? "Leopards API error");
+      continue;
+    }
     allPackets.push(...extractTrackedPackets(result));
+  }
+
+  if (!allPackets.length && chunkErrors.length) {
+    return { ok: false, message: chunkErrors[0] };
   }
 
   const byCn = new Map(

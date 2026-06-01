@@ -335,8 +335,7 @@ export async function bookOrder({
     },
   });
 
-  // Always write tracking back to Shopify to mark order as fulfilled.
-  if (booked.trackNumber) {
+  if (booked.trackNumber && settings.fulfillmentWritebackEnabled) {
     await writebackFulfillment(
       admin,
       order.id,
@@ -566,8 +565,8 @@ export async function bookOrdersBatch({ admin, storeId, orderIds }) {
       },
     });
 
-    // Always write tracking back to Shopify to mark order as fulfilled.
-    if (trackNumber) {
+    // Write tracking back to Shopify if writeback is enabled.
+    if (trackNumber && settings.fulfillmentWritebackEnabled) {
       await writebackFulfillment(admin, order.id, trackNumber, slipLink, order.note);
     }
 

@@ -63,10 +63,8 @@ export default function Loadsheets() {
     () => new Set(eligibleShipments.map((s) => s.cnNumber)),
   );
   const [expandedLoadsheet, setExpandedLoadsheet] = useState(null);
-  // Track which load sheet row is currently downloading
   const [downloadingId, setDownloadingId] = useState(null);
 
-  // Re-sync selection if the loader returns a different eligible set.
   useEffect(() => {
     setSelectedCns(new Set(eligibleShipments.map((s) => s.cnNumber)));
   }, [eligibleShipments]);
@@ -96,18 +94,12 @@ export default function Loadsheets() {
     setSelectedCns(new Set());
   }
 
-  /**
-   * Fetch the PDF blob from the server and open it in a new tab.
-   * Falls back to a toast error if anything goes wrong — never navigates away.
-   */
   async function handleDownload(loadSheetId, rowId) {
     setDownloadingId(rowId);
     try {
       const url = `/app/loadsheets/download?loadSheetId=${encodeURIComponent(loadSheetId)}`;
       const response = await fetch(url);
-      if (!response.ok) {
-        throw new Error(`Server returned ${response.status}`);
-      }
+      if (!response.ok) throw new Error(`Server returned ${response.status}`);
       const contentType = response.headers.get("content-type") ?? "";
       if (!contentType.includes("application/pdf")) {
         const text = await response.text();
@@ -116,11 +108,9 @@ export default function Loadsheets() {
       const blob = await response.blob();
       const objectUrl = URL.createObjectURL(blob);
       const win = window.open(objectUrl, "_blank");
-      // Revoke after a short delay to free memory once the tab has loaded.
       if (win) {
         setTimeout(() => URL.revokeObjectURL(objectUrl), 30_000);
       } else {
-        // Popup was blocked — fall back to a direct link download.
         const a = document.createElement("a");
         a.href = objectUrl;
         a.download = `loadsheet-${loadSheetId}.pdf`;
@@ -129,10 +119,7 @@ export default function Loadsheets() {
       }
     } catch (err) {
       console.error("[loadsheet download]", err);
-      shopify.toast.show(
-        "Could not download load sheet. Please try again.",
-        { isError: true },
-      );
+      shopify.toast.show("Could not download load sheet. Please try again.", { isError: true });
     } finally {
       setDownloadingId(null);
     }
@@ -149,146 +136,140 @@ export default function Loadsheets() {
 
   return (
     <s-page heading="Loadsheets">
+
+      {/* ── Generate section ── */}
       <s-section heading="Generate loadsheet">
         {eligibleShipments.length === 0 ? (
-          <s-box padding="base" borderWidth="base" borderRadius="base">
-            <s-stack direction="block" gap="small">
-              <s-text>No eligible shipments available.</s-text>
-              <s-text tone="subdued" variant="bodySmall">
-                Loadsheets can only include booked, non-terminal shipments (not
-                Cancelled, Delivered, or Returned). Book some orders first, then
-                return here to generate a load sheet.
-              </s-text>
-            </s-stack>
-          </s-box>
+          <div style={{ background: "#f6f6f7", border: "1px solid #e1e3e5", borderRadius: 8, padding: "40px 20px", textAlign: "center" }}>
+            <div style={{ fontSize: 36, marginBottom: 10 }}>📋</div>
+            <div style={{ fontWeight: 700, fontSize: 15, color: "#202223", marginBottom: 4 }}>No eligible shipments</div>
+            <div style={{ fontSize: 13, color: "#6d7175" }}>
+              Loadsheets can only include booked, active shipments (not Cancelled, Delivered, or Returned).
+              Book some orders first, then return here.
+            </div>
+            <a href="/app/orders" style={{ display: "inline-block", marginTop: 14, padding: "7px 16px", background: "#5c6ac4", color: "#fff", borderRadius: 6, fontSize: 13, fontWeight: 600, textDecoration: "none" }}>
+              Go to Orders →
+            </a>
+          </div>
         ) : (
           <fetcher.Form method="post">
-            <s-stack direction="block" gap="base">
-              <s-stack direction="inline" gap="base" blockAlign="center">
-                <s-button
-                  onClick={allSelected ? deselectAll : selectAll}
-                  disabled={busy}
-                >
+            <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+
+              {/* Select all / count row */}
+              <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+                <s-button onClick={allSelected ? deselectAll : selectAll} disabled={busy}>
                   {allSelected ? "Deselect all" : "Select all"}
                 </s-button>
-                <s-text tone="subdued" variant="bodySmall">
-                  {selectedCns.size} of {eligibleShipments.length} shipment
-                  {eligibleShipments.length !== 1 ? "s" : ""} selected
-                </s-text>
-              </s-stack>
+                <span style={{ fontSize: 13, color: "#6d7175" }}>
+                  {selectedCns.size} of {eligibleShipments.length} shipment{eligibleShipments.length !== 1 ? "s" : ""} selected
+                </span>
+              </div>
 
-              <s-stack direction="block" gap="extraSmall">
-                {eligibleShipments.map((shipment) => (
-                  <s-checkbox
+              {/* Shipment checkboxes */}
+              <div style={{ background: "#fff", border: "1px solid #e1e3e5", borderRadius: 8, overflow: "hidden" }}>
+                {eligibleShipments.map((shipment, i) => (
+                  <div
                     key={shipment.id}
-                    label={`${shipment.orderName} — ${shipment.cnNumber}`}
-                    checked={selectedCns.has(shipment.cnNumber)}
-                    onChange={() => toggleCn(shipment.cnNumber)}
-                  />
+                    style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 16px", borderBottom: i < eligibleShipments.length - 1 ? "1px solid #f1f2f4" : "none" }}
+                  >
+                    <s-checkbox
+                      checked={selectedCns.has(shipment.cnNumber)}
+                      onChange={() => toggleCn(shipment.cnNumber)}
+                      disabled={busy}
+                    />
+                    <span style={{ fontWeight: 600, fontSize: 13, color: "#202223", fontFamily: "monospace" }}>{shipment.cnNumber}</span>
+                    <span style={{ fontSize: 13, color: "#6d7175" }}>{shipment.orderName}</span>
+                    <span style={{ marginLeft: "auto", fontSize: 11, padding: "2px 7px", borderRadius: 10, background: "#eaf4fb", color: "#084e8a", fontWeight: 600 }}>
+                      {shipment.status}
+                    </span>
+                  </div>
                 ))}
-              </s-stack>
+              </div>
 
               <input type="hidden" name="cnNumbers" value={selectedCnList} />
-              <s-button
-                type="submit"
-                variant="primary"
-                disabled={busy || selectedCns.size === 0}
-                loading={busy}
-              >
-                {busy
-                  ? `Generating load sheet…`
-                  : `Generate load sheet for ${selectedCns.size} shipment${selectedCns.size !== 1 ? "s" : ""}`}
-              </s-button>
-            </s-stack>
+              <div>
+                <s-button
+                  type="submit"
+                  variant="primary"
+                  disabled={busy || selectedCns.size === 0}
+                  loading={busy}
+                >
+                  {busy
+                    ? "Generating load sheet…"
+                    : `Generate load sheet for ${selectedCns.size} shipment${selectedCns.size !== 1 ? "s" : ""}`}
+                </s-button>
+              </div>
+            </div>
           </fetcher.Form>
         )}
       </s-section>
 
+      {/* ── History section ── */}
       <s-section heading="History">
         {loadsheets.length === 0 ? (
-          <s-box padding="base" borderWidth="base" borderRadius="base">
-            <s-stack direction="block" gap="small">
-              <s-text>No load sheets generated yet.</s-text>
-              <s-text tone="subdued" variant="bodySmall">
-                Select booked shipments above and click Generate to create your
-                first load sheet.
-              </s-text>
-            </s-stack>
-          </s-box>
+          <div style={{ background: "#f6f6f7", border: "1px solid #e1e3e5", borderRadius: 8, padding: "32px 20px", textAlign: "center" }}>
+            <div style={{ fontWeight: 600, fontSize: 14, color: "#202223", marginBottom: 4 }}>No load sheets yet</div>
+            <div style={{ fontSize: 13, color: "#6d7175" }}>
+              Select booked shipments above and click Generate to create your first load sheet.
+            </div>
+          </div>
         ) : (
-          <s-table>
-            <s-table-header-row>
-              <s-table-header>Loadsheet ID</s-table-header>
-              <s-table-header>Shipments</s-table-header>
-              <s-table-header>Status</s-table-header>
-              <s-table-header>Created</s-table-header>
-              <s-table-header>PDF</s-table-header>
-              <s-table-header>Details</s-table-header>
-            </s-table-header-row>
-            <s-table-body>
-              {loadsheets.map((loadsheet) => {
-                const isExpanded = expandedLoadsheet === loadsheet.id;
-                const isDownloading = downloadingId === loadsheet.id;
-                return (
-                  <s-table-row key={loadsheet.id}>
-                    <s-table-cell>
-                      <s-text variant="bodySmall" tone="subdued">
-                        {loadsheet.loadSheetId}
-                      </s-text>
-                    </s-table-cell>
-                    <s-table-cell>{loadsheet.cnCount}</s-table-cell>
-                    <s-table-cell>
-                      <s-badge
-                        tone={loadsheet.status === "downloaded" ? "success" : "info"}
-                      >
-                        {loadsheet.status === "downloaded" ? "Downloaded" : "Generated"}
-                      </s-badge>
-                    </s-table-cell>
-                    <s-table-cell>
-                      {new Date(loadsheet.createdAt).toLocaleString()}
-                    </s-table-cell>
-                    <s-table-cell>
-                      <s-button
-                        onClick={() =>
-                          handleDownload(loadsheet.loadSheetId, loadsheet.id)
-                        }
-                        disabled={isDownloading}
-                        loading={isDownloading}
-                      >
-                        {isDownloading ? "Generating PDF…" : "Download"}
-                      </s-button>
-                    </s-table-cell>
-                    <s-table-cell>
-                      <s-stack direction="block" gap="extraSmall">
-                        <s-link
-                          href="#"
-                          onClick={(e) => {
-                            e.preventDefault();
-                            setExpandedLoadsheet(
-                              isExpanded ? null : loadsheet.id,
-                            );
-                          }}
-                        >
-                          {isExpanded ? "Hide" : "Show"} contents
-                        </s-link>
-                        {isExpanded && (
-                          <s-stack direction="block" gap="extraSmall">
-                            {loadsheet.shipments.map((s, idx) => (
-                              <s-text key={`${s.cnNumber}-${idx}`} variant="bodySmall">
-                                {s.orderName} — {s.cnNumber}
-                              </s-text>
-                            ))}
-                          </s-stack>
-                        )}
-                      </s-stack>
-                    </s-table-cell>
-                  </s-table-row>
-                );
-              })}
-            </s-table-body>
-          </s-table>
+          <div style={{ background: "#fff", border: "1px solid #e1e3e5", borderRadius: 8, overflow: "hidden" }}>
+            {loadsheets.map((loadsheet, i) => {
+              const isExpanded = expandedLoadsheet === loadsheet.id;
+              const isDownloading = downloadingId === loadsheet.id;
+              return (
+                <div key={loadsheet.id} style={{ borderBottom: i < loadsheets.length - 1 ? "1px solid #f1f2f4" : "none" }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 12, padding: "12px 16px", flexWrap: "wrap" }}>
+                    {/* ID + meta */}
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontWeight: 600, fontSize: 13, color: "#202223", fontFamily: "monospace" }}>{loadsheet.loadSheetId}</div>
+                      <div style={{ fontSize: 12, color: "#6d7175", marginTop: 2 }}>
+                        {loadsheet.cnCount} shipment{loadsheet.cnCount !== 1 ? "s" : ""} · {new Date(loadsheet.createdAt).toLocaleString()}
+                      </div>
+                    </div>
+
+                    {/* Status badge */}
+                    <span style={{ padding: "2px 8px", borderRadius: 12, fontSize: 11, fontWeight: 600, background: loadsheet.status === "downloaded" ? "#e3f1df" : "#eaf4fb", color: loadsheet.status === "downloaded" ? "#1e542a" : "#084e8a", whiteSpace: "nowrap" }}>
+                      {loadsheet.status === "downloaded" ? "Downloaded" : "Generated"}
+                    </span>
+
+                    {/* Download button */}
+                    <s-button
+                      onClick={() => handleDownload(loadsheet.loadSheetId, loadsheet.id)}
+                      disabled={isDownloading}
+                      loading={isDownloading}
+                    >
+                      {isDownloading ? "Downloading…" : "Download PDF"}
+                    </s-button>
+
+                    {/* Expand toggle */}
+                    <button
+                      onClick={() => setExpandedLoadsheet(isExpanded ? null : loadsheet.id)}
+                      style={{ background: "none", border: "1px solid #c9cccf", borderRadius: 6, padding: "5px 10px", cursor: "pointer", fontSize: 12, color: "#444750", whiteSpace: "nowrap" }}
+                    >
+                      {isExpanded ? "▲ Hide" : "▼ Contents"}
+                    </button>
+                  </div>
+
+                  {/* Expanded contents */}
+                  {isExpanded && (
+                    <div style={{ padding: "0 16px 12px", display: "flex", flexDirection: "column", gap: 4 }}>
+                      {loadsheet.shipments.map((s, idx) => (
+                        <div key={`${s.cnNumber}-${idx}`} style={{ display: "flex", gap: 10, fontSize: 13, color: "#444750" }}>
+                          <span style={{ fontFamily: "monospace", color: "#202223", fontWeight: 600 }}>{s.cnNumber}</span>
+                          <span style={{ color: "#6d7175" }}>{s.orderName}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
         )}
       </s-section>
+
     </s-page>
   );
 }

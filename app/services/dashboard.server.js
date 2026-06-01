@@ -13,10 +13,10 @@ export async function getDashboard(storeId) {
         _count: { _all: true },
       }),
       db.shipment.count({
-        where: { storeId, status: "PENDING", cnNumber: null },
+        where: { storeId, status: "PENDING", cnNumber: null, lastError: null },
       }),
       db.shipment.count({
-        where: { storeId, status: "PENDING", cnNumber: { not: null } },
+        where: { storeId, status: "PENDING", lastError: { not: null } },
       }),
       db.shipment.count({
         where: { storeId, status: "BOOKED", bookedAt: { gte: todayStart } },

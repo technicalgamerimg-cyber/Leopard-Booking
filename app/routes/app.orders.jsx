@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { useFetcher, useLoaderData, useNavigation, useRouteError } from "react-router";
+import { Form, useFetcher, useLoaderData, useNavigation, useRouteError } from "react-router";
 import { useAppBridge } from "@shopify/app-bridge-react";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
@@ -19,19 +19,37 @@ const STATUS_STYLES = {
 };
 
 const FIELD_LABELS = {
-  booked_packet_weight:       "Weight",
-  booked_packet_no_piece:     "Pieces",
+  booked_packet_weight:         "Weight",
+  booked_packet_no_piece:       "Pieces",
   booked_packet_collect_amount: "COD amount",
-  origin_city:                "Origin city",
-  destination_city:           "Destination city",
-  shipment_id:                "Shipment type",
-  shipment_name_eng:          "Shipper name",
-  shipment_phone:             "Shipper phone",
-  shipment_address:           "Shipper address",
-  consignment_name_eng:       "Consignee name",
-  consignment_phone:          "Consignee phone",
-  consignment_address:        "Consignee address",
-  special_instructions:       "Special instructions",
+  origin_city:                  "Origin city",
+  destination_city:             "Destination city",
+  shipment_id:                  "Shipment type",
+  shipment_name_eng:            "Shipper name",
+  shipment_phone:               "Shipper phone",
+  shipment_address:             "Shipper address",
+  consignment_name_eng:         "Consignee name",
+  consignment_phone:            "Consignee phone",
+  consignment_address:          "Consignee address",
+  special_instructions:         "Special instructions",
+};
+
+const FINANCIAL_STATUS_STYLES = {
+  PAID:                { bg: "#e3f1df", text: "#1e542a" },
+  PARTIALLY_PAID:      { bg: "#eaf4fb", text: "#084e8a" },
+  PENDING:             { bg: "#fff5ea", text: "#8a4b00" },
+  REFUNDED:            { bg: "#f6f6f7", text: "#444750" },
+  PARTIALLY_REFUNDED:  { bg: "#f6f6f7", text: "#444750" },
+  VOIDED:              { bg: "#f6f6f7", text: "#444750" },
+};
+
+const FINANCIAL_STATUS_LABELS = {
+  PAID:               "Paid",
+  PARTIALLY_PAID:     "Partial",
+  PENDING:            "Pending",
+  REFUNDED:           "Refunded",
+  PARTIALLY_REFUNDED: "Part. refunded",
+  VOIDED:             "Voided",
 };
 
 function StatusPill({ status }) {
@@ -45,10 +63,12 @@ function StatusPill({ status }) {
 }
 
 function FinancialBadge({ status }) {
-  const isPaid = status === "PAID";
+  const key = status?.toUpperCase?.() ?? "";
+  const style = FINANCIAL_STATUS_STYLES[key] ?? { bg: "#f6f6f7", text: "#444750" };
+  const label = FINANCIAL_STATUS_LABELS[key] ?? (status ?? "—");
   return (
-    <span style={{ display: "inline-block", padding: "2px 7px", borderRadius: 10, fontSize: 11, fontWeight: 600, background: isPaid ? "#e3f1df" : "#fff5ea", color: isPaid ? "#1e542a" : "#8a4b00" }}>
-      {status ?? "—"}
+    <span style={{ display: "inline-block", padding: "2px 7px", borderRadius: 10, fontSize: 11, fontWeight: 600, background: style.bg, color: style.text, whiteSpace: "nowrap" }}>
+      {label}
     </span>
   );
 }
@@ -102,10 +122,10 @@ export const action = async ({ request }) => {
     storeId: store.id,
     orderId: formData.get("orderId"),
     overrides: {
-      weightGrams:          formData.get("overrideWeight"),
-      noOfPieces:           formData.get("overridePieces"),
-      codAmount:            formData.get("overrideCod"),
-      specialInstructions:  formData.get("overrideInstructions"),
+      weightGrams:         formData.get("overrideWeight"),
+      noOfPieces:          formData.get("overridePieces"),
+      codAmount:           formData.get("overrideCod"),
+      specialInstructions: formData.get("overrideInstructions"),
     },
   });
 };
@@ -125,7 +145,6 @@ function buildPageQuery({ query, after, before }) {
   return p.toString();
 }
 
-// ── Booking panel (appears as a dedicated card, NOT inside the table) ──
 function BookingPanel({ order, fetcher, defaultWeightGrams, defaultSpecialInstructions, hasCredentials, onClose }) {
   const [weight, setWeight] = useState(String(defaultWeightGrams));
   const [pieces, setPieces] = useState("1");
@@ -143,7 +162,6 @@ function BookingPanel({ order, fetcher, defaultWeightGrams, defaultSpecialInstru
 
   return (
     <div style={{ background: "#f9fafb", border: "1px solid #c9cccf", borderRadius: 8, padding: 20 }}>
-      {/* Panel header */}
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 16 }}>
         <div>
           <div style={{ fontWeight: 700, fontSize: 15, color: "#202223" }}>
@@ -164,7 +182,6 @@ function BookingPanel({ order, fetcher, defaultWeightGrams, defaultSpecialInstru
         </button>
       </div>
 
-      {/* Fields */}
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 12, marginBottom: 12 }}>
         <s-text-field
           label="Weight (grams)"
@@ -278,9 +295,11 @@ export default function Orders() {
       )}
 
       {hasCredentials && !hasOriginCity && (
-        <s-banner tone="warning">
-          <s-text>Origin city not set. <s-link href="/app/settings">Open Settings →</s-link></s-text>
-        </s-banner>
+        <s-section>
+          <div style={{ background: "#fff8ec", border: "1px solid #e8912d", borderRadius: 8, padding: "12px 16px", fontSize: 13, color: "#8a4b00" }}>
+            ⚠️ Origin city not set. <a href="/app/settings" style={{ color: "#5c6ac4", fontWeight: 600 }}>Open Settings →</a>
+          </div>
+        </s-section>
       )}
 
       {/* ── Field validation errors ── */}
@@ -326,9 +345,9 @@ export default function Orders() {
         </s-section>
       )}
 
-      {/* ── Search bar ── */}
+      {/* ── Search bar — uses plain Form (GET) separate from the POST fetcher ── */}
       <s-section>
-        <fetcher.Form method="get">
+        <Form method="get">
           <div style={{ display: "flex", gap: 10, alignItems: "flex-end", flexWrap: "wrap" }}>
             <div style={{ flex: "1 1 260px" }}>
               <s-text-field
@@ -341,7 +360,7 @@ export default function Orders() {
             <s-button type="submit">Search</s-button>
             {query && <s-button href="/app/orders">Clear</s-button>}
           </div>
-        </fetcher.Form>
+        </Form>
       </s-section>
 
       {/* ── Batch action bar ── */}
@@ -447,7 +466,7 @@ export default function Orders() {
                     <s-table-cell>
                       {order.codAmount > 0 ? (
                         <span style={{ fontSize: 13, fontWeight: 600, color: "#202223" }}>
-                          {order.codAmount} <span style={{ fontWeight: 400, color: "#6d7175" }}>{order.currency}</span>
+                          {order.codAmount.toLocaleString()} <span style={{ fontWeight: 400, color: "#6d7175" }}>{order.currency}</span>
                         </span>
                       ) : (
                         <span style={{ fontSize: 12, color: "#8c9196" }}>Prepaid</span>
@@ -509,7 +528,7 @@ export default function Orders() {
         )}
       </s-section>
 
-      {/* ── Booking panel — appears BELOW the table as its own card, not in the table ── */}
+      {/* ── Booking panel ── */}
       {bookingPanelOrder && (
         <s-section heading={`Custom booking options — ${bookingPanelOrder.name}`}>
           <BookingPanel
