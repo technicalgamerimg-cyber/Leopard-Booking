@@ -2,12 +2,12 @@
 
 client_id = "375e36f1941551d648b389d408b06d6b"
 name = "Leopard Booking"
-application_url = "https://capture-headset-nutten-nicholas.trycloudflare.com"
+application_url = "https://book-with-leopards.vercel.app"
 embedded = true
 handle = "leopard-booking-1"
 
 [build]
-automatically_update_urls_on_dev = true
+automatically_update_urls_on_dev = false
 
 [webhooks]
 api_version = "2025-10"
@@ -62,7 +62,7 @@ scopes = "read_orders,write_orders,read_products,read_customers,read_fulfillment
 
 [auth]
 redirect_urls = [
-  "https://capture-headset-nutten-nicholas.trycloudflare.com/auth/callback",
-  "https://capture-headset-nutten-nicholas.trycloudflare.com/auth/shopify/callback",
-  "https://capture-headset-nutten-nicholas.trycloudflare.com/api/auth/callback"
+  "https://book-with-leopards.vercel.app/auth/callback",
+  "https://book-with-leopards.vercel.app/auth/shopify/callback",
+  "https://book-with-leopards.vercel.app/api/auth/callback"
 ]

@@ -1,0 +1,125 @@
+{
+  "version": 1,
+  "skills": {
+    "shopify-admin": {
+      "source": "Shopify/shopify-ai-toolkit",
+      "sourceType": "github",
+      "skillPath": "skills/shopify-admin/SKILL.md",
+      "computedHash": "ebc56aec6ae2dc67f7fd33db858701959afbf69fb389f52cea8aa44b8a80dee0"
+    },
+    "shopify-app-store-review": {
+      "source": "Shopify/shopify-ai-toolkit",
+      "sourceType": "github",
+      "skillPath": "skills/shopify-app-store-review/SKILL.md",
+      "computedHash": "0f6486219f6764215b25f630f66f6f8ff5ef1a3d6423c1b0894184da2e767460"
+    },
+    "shopify-custom-data": {
+      "source": "Shopify/shopify-ai-toolkit",
+      "sourceType": "github",
+      "skillPath": "skills/shopify-custom-data/SKILL.md",
+      "computedHash": "aa325e8bdddd1b1de9be666b2dddf85aec21d3babd78f50346a0b9fb8c3c9cf6"
+    },
+    "shopify-customer": {
+      "source": "Shopify/shopify-ai-toolkit",
+      "sourceType": "github",
+      "skillPath": "skills/shopify-customer/SKILL.md",
+      "computedHash": "60bf6cc2c120c860c50e00918d7838f0509bdb06d2721b745182993877abfea9"
+    },
+    "shopify-dev": {
+      "source": "Shopify/shopify-ai-toolkit",
+      "sourceType": "github",
+      "skillPath": "skills/shopify-dev/SKILL.md",
+      "computedHash": "ea52858c68aaa72529cb3d7fb11308c096e3a8b27f5bc425c88e3a5435b6ead4"
+    },
+    "shopify-functions": {
+      "source": "Shopify/shopify-ai-toolkit",
+      "sourceType": "github",
+      "skillPath": "skills/shopify-functions/SKILL.md",
+      "computedHash": "0171da330e0cf1cef3abc9940af55ac8bb0feff4752df19dec248801fab577d5"
+    },
+    "shopify-hydrogen": {
+      "source": "Shopify/shopify-ai-toolkit",
+      "sourceType": "github",
+      "skillPath": "skills/shopify-hydrogen/SKILL.md",
+      "computedHash": "a81b7b778f14fb50c133fa20a09f3853a10ab867dda73645cfe091fb5ddb1ea8"
+    },
+    "shopify-liquid": {
+      "source": "Shopify/shopify-ai-toolkit",
+      "sourceType": "github",
+      "skillPath": "skills/shopify-liquid/SKILL.md",
+      "computedHash": "6a646e1d396340a4d61e354c2f81e2c23e97ef5d8173a6dfa79107c6d4e3734a"
+    },
+    "shopify-onboarding-dev": {
+      "source": "Shopify/shopify-ai-toolkit",
+      "sourceType": "github",
+      "skillPath": "skills/shopify-onboarding-dev/SKILL.md",
+      "computedHash": "ff3bf9d62fd2df291c591e66d683ad59a5fbc1e24747802f4fa8a9a3c95ea425"
+    },
+    "shopify-onboarding-merchant": {
+      "source": "Shopify/shopify-ai-toolkit",
+      "sourceType": "github",
+      "skillPath": "skills/shopify-onboarding-merchant/SKILL.md",
+      "computedHash": "a99c118e70159e5a23eebcefa7b5572ea1a5af1913a16cab72711fc932520bcf"
+    },
+    "shopify-partner": {
+      "source": "Shopify/shopify-ai-toolkit",
+      "sourceType": "github",
+      "skillPath": "skills/shopify-partner/SKILL.md",
+      "computedHash": "2b3d06756f174aca18b43842c347d48e077440a37bb07c64c8aaa9feab2e16ea"
+    },
+    "shopify-payments-apps": {
+      "source": "Shopify/shopify-ai-toolkit",
+      "sourceType": "github",
+      "skillPath": "skills/shopify-payments-apps/SKILL.md",
+      "computedHash": "9d805f6aa4619e0466a8dabdb93240d28f5651958f1eb6f0065b7e3a0f679488"
+    },
+    "shopify-polaris-admin-extensions": {
+      "source": "Shopify/shopify-ai-toolkit",
+      "sourceType": "github",
+      "skillPath": "skills/shopify-polaris-admin-extensions/SKILL.md",
+      "computedHash": "274bcd684401be8cfa63b95b1f9432b6c24d3b7a53e6534fa2a77c82783d8ac1"
+    },
+    "shopify-polaris-app-home": {
+      "source": "Shopify/shopify-ai-toolkit",
+      "sourceType": "github",
+      "skillPath": "skills/shopify-polaris-app-home/SKILL.md",
+      "computedHash": "847d5bca121a443a70b8e9c937bb719186014768bedc0e9bb25f3a206b6a97cb"
+    },
+    "shopify-polaris-checkout-extensions": {
+      "source": "Shopify/shopify-ai-toolkit",
+      "sourceType": "github",
+      "skillPath": "skills/shopify-polaris-checkout-extensions/SKILL.md",
+      "computedHash": "a9d44003b5f81bf2c5c63bbd1c6f64823cbe52de61cfaee0d7ad20b8c48226ed"
+    },
+    "shopify-polaris-customer-account-extensions": {
+      "source": "Shopify/shopify-ai-toolkit",
+      "sourceType": "github",
+      "skillPath": "skills/shopify-polaris-customer-account-extensions/SKILL.md",
+      "computedHash": "3bcfdcbc2468fd715db206685f9a94fd9a7fba698d2f2ae09d7573082cd0ce2f"
+    },
+    "shopify-pos-ui": {
+      "source": "Shopify/shopify-ai-toolkit",
+      "sourceType": "github",
+      "skillPath": "skills/shopify-pos-ui/SKILL.md",
+      "computedHash": "a79306a9f00a02b4dd8ce2775ac388dfc3f10f152d0a958f179d3cba46ea0ec6"
+    },
+    "shopify-storefront-graphql": {
+      "source": "Shopify/shopify-ai-toolkit",
+      "sourceType": "github",
+      "skillPath": "skills/shopify-storefront-graphql/SKILL.md",
+      "computedHash": "b8a596d3c577ace49818be71c9535aedfaeb73661ac80cdd9c6a7f4998c2ed75"
+    },
+    "shopify-use-shopify-cli": {
+      "source": "Shopify/shopify-ai-toolkit",
+      "sourceType": "github",
+      "skillPath": "skills/shopify-use-shopify-cli/SKILL.md",
+      "computedHash": "55eb967cc451763b396de2620a3f6758fe7c0a858c0f0f41ff7e3b588f668935"
+    },
+    "ucp": {
+      "source": "Shopify/shopify-ai-toolkit",
+      "sourceType": "github",
+      "skillPath": "skills/ucp/SKILL.md",
+      "computedHash": "d4bff942d6fb6935958c13198b9ccd01d28eae139fd85cfa3355a12a64bab53d"
+    }
+  }
+}

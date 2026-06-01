@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//etc/**)",
+      "Bash(systeminfo)"
+    ]
+  }
+}
