@@ -1,22 +1,15 @@
 {
   "version": 2,
   "buildCommand": "npm run setup && npm run build",
-  "outputDirectory": "build",
   "installCommand": "npm install",
   "framework": null,
+  "outputDirectory": "build/client",
   "functions": {
-    "build/server/index.js": {
+    "api/server.js": {
       "maxDuration": 30
     }
   },
-  "routes": [
-    {
-      "src": "/assets/(.*)",
-      "dest": "/build/client/assets/$1"
-    },
-    {
-      "src": "/(.*)",
-      "dest": "/build/server/index.js"
-    }
+  "rewrites": [
+    { "source": "/(.*)", "destination": "/api/server" }
   ]
 }
