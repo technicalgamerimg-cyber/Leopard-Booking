@@ -3,10 +3,10 @@
   "buildCommand": "npm run setup && npm run build",
   "installCommand": "npm install",
   "framework": null,
-  "outputDirectory": "build/client",
   "functions": {
     "api/server.js": {
-      "maxDuration": 30
+      "maxDuration": 30,
+      "memory": 1024
     }
   },
   "rewrites": [
