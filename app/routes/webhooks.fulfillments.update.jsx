@@ -2,21 +2,28 @@ import { authenticate } from "../shopify.server";
 import db from "../db.server";
 
 const STATUS_MAP = {
-  delivered: "DELIVERED",
-  in_transit: "IN_TRANSIT",
-  out_for_delivery: "IN_TRANSIT",
+  delivered:          "DELIVERED",
+  in_transit:         "IN_TRANSIT",
+  out_for_delivery:   "IN_TRANSIT",
   returned_to_sender: "RETURNED",
-  failure: "EXCEPTION",
+  failure:            "EXCEPTION",
 };
 
 export const action = async ({ request }) => {
-  const { shop, topic, payload } = await authenticate.webhook(request);
+  let shop, topic, payload;
+  try {
+    ({ shop, topic, payload } = await authenticate.webhook(request));
+  } catch (err) {
+    if (err instanceof Response) throw err;
+    console.error("[webhook] authenticate failed:", err);
+    return new Response("Bad Request", { status: 400 });
+  }
 
   console.log(`Received ${topic} webhook for ${shop}`);
 
   try {
     const store = await db.store.findUnique({ where: { shopDomain: shop } });
-    if (!store) return new Response();
+    if (!store) return new Response("OK", { status: 200 });
 
     const fulfillment = payload;
     const shopifyOrderId = `gid://shopify/Order/${fulfillment.order_id}`;
@@ -25,10 +32,10 @@ export const action = async ({ request }) => {
       where: { storeId_shopifyOrderId: { storeId: store.id, shopifyOrderId } },
     });
 
-    if (!shipment) return new Response();
+    if (!shipment) return new Response("OK", { status: 200 });
 
     const newStatus = STATUS_MAP[fulfillment.shipment_status];
-    if (!newStatus || newStatus === shipment.status) return new Response();
+    if (!newStatus || newStatus === shipment.status) return new Response("OK", { status: 200 });
 
     await db.$transaction([
       db.shipment.update({
@@ -52,5 +59,5 @@ export const action = async ({ request }) => {
     console.error(`[${topic}] ${shop}:`, err);
   }
 
-  return new Response();
+  return new Response("OK", { status: 200 });
 };

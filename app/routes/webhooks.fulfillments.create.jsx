@@ -2,13 +2,20 @@ import { authenticate } from "../shopify.server";
 import db from "../db.server";
 
 export const action = async ({ request }) => {
-  const { shop, topic, payload } = await authenticate.webhook(request);
+  let shop, topic, payload;
+  try {
+    ({ shop, topic, payload } = await authenticate.webhook(request));
+  } catch (err) {
+    if (err instanceof Response) throw err;
+    console.error("[webhook] authenticate failed:", err);
+    return new Response("Bad Request", { status: 400 });
+  }
 
   console.log(`Received ${topic} webhook for ${shop}`);
 
   try {
     const store = await db.store.findUnique({ where: { shopDomain: shop } });
-    if (!store) return new Response();
+    if (!store) return new Response("OK", { status: 200 });
 
     const fulfillment = payload;
     const shopifyOrderId = `gid://shopify/Order/${fulfillment.order_id}`;
@@ -17,9 +24,8 @@ export const action = async ({ request }) => {
       where: { storeId_shopifyOrderId: { storeId: store.id, shopifyOrderId } },
     });
 
-    // Only advance shipments that haven't been dispatched or completed yet.
     const advanceable = ["PENDING", "BOOKED"];
-    if (!shipment || !advanceable.includes(shipment.status)) return new Response();
+    if (!shipment || !advanceable.includes(shipment.status)) return new Response("OK", { status: 200 });
 
     const trackingNumbers = fulfillment.tracking_numbers ?? [];
 
@@ -42,5 +48,5 @@ export const action = async ({ request }) => {
     console.error(`[${topic}] ${shop}:`, err);
   }
 
-  return new Response();
+  return new Response("OK", { status: 200 });
 };

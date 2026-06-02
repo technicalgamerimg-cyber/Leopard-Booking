@@ -1,17 +1,21 @@
 import { authenticate } from "../shopify.server";
 import db from "../db.server";
 
-// "Fulfilled" in Shopify means the merchant created a fulfillment record (i.e., packaged
-// and shipped). This maps to IN_TRANSIT, not DELIVERED. Actual delivery is confirmed by
-// the Leopard courier status sync — not by Shopify.
 export const action = async ({ request }) => {
-  const { shop, topic, payload } = await authenticate.webhook(request);
+  let shop, topic, payload;
+  try {
+    ({ shop, topic, payload } = await authenticate.webhook(request));
+  } catch (err) {
+    if (err instanceof Response) throw err;
+    console.error("[webhook] authenticate failed:", err);
+    return new Response("Bad Request", { status: 400 });
+  }
 
   console.log(`Received ${topic} webhook for ${shop}`);
 
   try {
     const store = await db.store.findUnique({ where: { shopDomain: shop } });
-    if (!store) return new Response();
+    if (!store) return new Response("OK", { status: 200 });
 
     const shopifyOrderId = `gid://shopify/Order/${payload.id}`;
 
@@ -20,7 +24,7 @@ export const action = async ({ request }) => {
     });
 
     const advanceable = ["PENDING", "BOOKED"];
-    if (!shipment || !advanceable.includes(shipment.status)) return new Response();
+    if (!shipment || !advanceable.includes(shipment.status)) return new Response("OK", { status: 200 });
 
     await db.$transaction([
       db.shipment.update({
@@ -41,5 +45,5 @@ export const action = async ({ request }) => {
     console.error(`[${topic}] ${shop}:`, err);
   }
 
-  return new Response();
+  return new Response("OK", { status: 200 });
 };

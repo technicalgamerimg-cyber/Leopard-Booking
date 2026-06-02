@@ -4,13 +4,20 @@ import { LeopardApiClient } from "../integrations/leopards/client.server";
 import { getSettings } from "../services/settings.server";
 
 export const action = async ({ request }) => {
-  const { shop, topic, payload } = await authenticate.webhook(request);
+  let shop, topic, payload;
+  try {
+    ({ shop, topic, payload } = await authenticate.webhook(request));
+  } catch (err) {
+    if (err instanceof Response) throw err;
+    console.error("[webhook] authenticate failed:", err);
+    return new Response("Bad Request", { status: 400 });
+  }
 
   console.log(`Received ${topic} webhook for ${shop}`);
 
   try {
     const store = await db.store.findUnique({ where: { shopDomain: shop } });
-    if (!store) return new Response();
+    if (!store) return new Response("OK", { status: 200 });
 
     const shopifyOrderId = `gid://shopify/Order/${payload.id}`;
 
@@ -19,31 +26,27 @@ export const action = async ({ request }) => {
     });
 
     if (!shipment || shipment.status === "CANCELLED" || shipment.status === "DELIVERED") {
-      return new Response();
+      return new Response("OK", { status: 200 });
     }
 
-    // If the shipment was booked with Leopards, also cancel it courier-side (best-effort).
-    let leopardsCancelMessage = "Order cancelled in Shopify; shipment was not yet booked with Leopards.";
-    const isBookedWithLeopards =
-      shipment.cnNumber &&
-      (shipment.status === "BOOKED" || shipment.status === "IN_TRANSIT");
+    let cancelMessage = "Order cancelled in Shopify; shipment was not yet booked with Leopards.";
+    const isBooked = shipment.cnNumber && (shipment.status === "BOOKED" || shipment.status === "IN_TRANSIT");
 
-    if (isBookedWithLeopards) {
+    if (isBooked) {
       try {
         const settings = await getSettings(store.id, { decrypt: true });
         if (settings.leopardApiKey && settings.leopardApiPassword) {
           const client = new LeopardApiClient({ storeId: store.id, settings });
           const result = await client.cancelBookedPackets([shipment.cnNumber]);
-          leopardsCancelMessage = result.ok
+          cancelMessage = result.ok
             ? "Order cancelled in Shopify; Leopards cancel succeeded."
             : `Order cancelled in Shopify; Leopards cancel failed: ${result.message ?? "unknown"}`;
         } else {
-          leopardsCancelMessage =
-            "Order cancelled in Shopify; Leopards cancel skipped (no credentials).";
+          cancelMessage = "Order cancelled in Shopify; Leopards cancel skipped (no credentials).";
         }
       } catch (err) {
         console.error(`[${topic}] Leopards cancel error:`, err);
-        leopardsCancelMessage = `Order cancelled in Shopify; Leopards cancel errored: ${err.message}`;
+        cancelMessage = `Order cancelled in Shopify; Leopards cancel errored: ${err.message}`;
       }
     }
 
@@ -58,7 +61,7 @@ export const action = async ({ request }) => {
           eventType: "CANCELLED",
           fromStatus: shipment.status,
           toStatus: "CANCELLED",
-          message: leopardsCancelMessage,
+          message: cancelMessage,
         },
       }),
     ]);
@@ -66,5 +69,5 @@ export const action = async ({ request }) => {
     console.error(`[${topic}] ${shop}:`, err);
   }
 
-  return new Response();
+  return new Response("OK", { status: 200 });
 };

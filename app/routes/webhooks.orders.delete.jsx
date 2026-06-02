@@ -1,16 +1,21 @@
 import { authenticate } from "../shopify.server";
 import db from "../db.server";
 
-// Fires when a merchant permanently deletes an order from Shopify Admin.
-// Hard-deleted orders can never be recovered, so we cancel any linked shipment.
 export const action = async ({ request }) => {
-  const { shop, topic, payload } = await authenticate.webhook(request);
+  let shop, topic, payload;
+  try {
+    ({ shop, topic, payload } = await authenticate.webhook(request));
+  } catch (err) {
+    if (err instanceof Response) throw err;
+    console.error("[webhook] authenticate failed:", err);
+    return new Response("Bad Request", { status: 400 });
+  }
 
   console.log(`Received ${topic} webhook for ${shop}`);
 
   try {
     const store = await db.store.findUnique({ where: { shopDomain: shop } });
-    if (!store) return new Response();
+    if (!store) return new Response("OK", { status: 200 });
 
     const shopifyOrderId = `gid://shopify/Order/${payload.id}`;
 
@@ -19,7 +24,7 @@ export const action = async ({ request }) => {
     });
 
     if (!shipment || shipment.status === "CANCELLED" || shipment.status === "DELIVERED") {
-      return new Response();
+      return new Response("OK", { status: 200 });
     }
 
     await db.$transaction([
@@ -41,5 +46,5 @@ export const action = async ({ request }) => {
     console.error(`[${topic}] ${shop}:`, err);
   }
 
-  return new Response();
+  return new Response("OK", { status: 200 });
 };

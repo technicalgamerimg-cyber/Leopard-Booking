@@ -2,13 +2,20 @@ import { authenticate } from "../shopify.server";
 import db from "../db.server";
 
 export const action = async ({ request }) => {
-  const { shop, topic, payload } = await authenticate.webhook(request);
+  let shop, topic, payload;
+  try {
+    ({ shop, topic, payload } = await authenticate.webhook(request));
+  } catch (err) {
+    if (err instanceof Response) throw err;
+    console.error("[webhook] authenticate failed:", err);
+    return new Response("Bad Request", { status: 400 });
+  }
 
   console.log(`Received ${topic} webhook for ${shop}`);
 
   try {
     const store = await db.store.findUnique({ where: { shopDomain: shop } });
-    if (!store) return new Response();
+    if (!store) return new Response("OK", { status: 200 });
 
     const order = payload;
     const shopifyOrderId = `gid://shopify/Order/${order.id}`;
@@ -17,11 +24,10 @@ export const action = async ({ request }) => {
       where: { storeId_shopifyOrderId: { storeId: store.id, shopifyOrderId } },
     });
 
-    // Only sync consignee details while the shipment hasn't been sent to the courier yet.
-    if (!shipment || shipment.status !== "PENDING") return new Response();
+    if (!shipment || shipment.status !== "PENDING") return new Response("OK", { status: 200 });
 
     const addr = order.shipping_address;
-    if (!addr) return new Response();
+    if (!addr) return new Response("OK", { status: 200 });
 
     const newAddress = [addr.address1, addr.address2, addr.city, addr.province, addr.zip]
       .filter(Boolean)
@@ -39,5 +45,5 @@ export const action = async ({ request }) => {
     console.error(`[${topic}] ${shop}:`, err);
   }
 
-  return new Response();
+  return new Response("OK", { status: 200 });
 };

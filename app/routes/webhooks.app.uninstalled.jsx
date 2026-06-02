@@ -3,17 +3,25 @@ import db from "../db.server";
 import { markStoreUninstalled } from "../services/store.server";
 
 export const action = async ({ request }) => {
-  const { shop, session, topic } = await authenticate.webhook(request);
+  let shop, topic;
+  try {
+    ({ shop, topic } = await authenticate.webhook(request));
+  } catch (err) {
+    // authenticate.webhook throws a Response on HMAC failure (401/400).
+    // Re-throw it so Shopify gets the correct status — do NOT swallow it.
+    if (err instanceof Response) throw err;
+    console.error("[webhook] authenticate failed:", err);
+    return new Response("Bad Request", { status: 400 });
+  }
 
   console.log(`Received ${topic} webhook for ${shop}`);
 
-  // Webhook requests can trigger multiple times and after an app has already been uninstalled.
-  // If this webhook already ran, the session may have been deleted previously.
-  if (session) {
+  try {
     await db.session.deleteMany({ where: { shop } });
+    await markStoreUninstalled(shop);
+  } catch (err) {
+    console.error(`[${topic}] ${shop}:`, err);
   }
 
-  await markStoreUninstalled(shop);
-
-  return new Response();
+  return new Response("OK", { status: 200 });
 };

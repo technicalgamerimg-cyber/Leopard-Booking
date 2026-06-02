@@ -1,13 +1,16 @@
 import { authenticate } from "../shopify.server";
 
-// Required endpoint for all Shopify apps.
-// Shopify sends this when a customer requests their stored data under GDPR.
-// Acknowledge with 200. If you hold PII beyond Shipment records, email it to
-// payload.customer.email within 30 days per Shopify's privacy requirements.
 export const action = async ({ request }) => {
-  const { shop, topic } = await authenticate.webhook(request);
+  let shop, topic;
+  try {
+    ({ shop, topic } = await authenticate.webhook(request));
+  } catch (err) {
+    if (err instanceof Response) throw err;
+    console.error("[webhook] authenticate failed:", err);
+    return new Response("Bad Request", { status: 400 });
+  }
 
   console.log(`Received ${topic} webhook for ${shop}`);
 
-  return new Response();
+  return new Response("OK", { status: 200 });
 };

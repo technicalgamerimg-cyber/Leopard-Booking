@@ -3,7 +3,14 @@ import db from "../db.server";
 import { getCodKeywords } from "../services/settings.server";
 
 export const action = async ({ request }) => {
-  const { shop, topic, payload } = await authenticate.webhook(request);
+  let shop, topic, payload;
+  try {
+    ({ shop, topic, payload } = await authenticate.webhook(request));
+  } catch (err) {
+    if (err instanceof Response) throw err;
+    console.error("[webhook] authenticate failed:", err);
+    return new Response("Bad Request", { status: 400 });
+  }
 
   console.log(`Received ${topic} webhook for ${shop}`);
 
@@ -12,7 +19,7 @@ export const action = async ({ request }) => {
       where: { shopDomain: shop },
       include: { settings: true },
     });
-    if (!store) return new Response();
+    if (!store) return new Response("OK", { status: 200 });
 
     const order = payload;
     const shopifyOrderId = `gid://shopify/Order/${order.id}`;
@@ -21,8 +28,7 @@ export const action = async ({ request }) => {
       where: { storeId_shopifyOrderId: { storeId: store.id, shopifyOrderId } },
     });
 
-    // Only update COD amount while the shipment hasn't been dispatched yet.
-    if (!shipment || shipment.status !== "PENDING") return new Response();
+    if (!shipment || shipment.status !== "PENDING") return new Response("OK", { status: 200 });
 
     const codKeywords = getCodKeywords(store.settings);
     const gatewayText = (order.payment_gateway_names ?? []).join(" ").toLowerCase();
@@ -37,5 +43,5 @@ export const action = async ({ request }) => {
     console.error(`[${topic}] ${shop}:`, err);
   }
 
-  return new Response();
+  return new Response("OK", { status: 200 });
 };
