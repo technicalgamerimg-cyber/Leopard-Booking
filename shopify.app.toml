@@ -21,6 +21,10 @@ api_version = "2025-10"
   uri = "/gdpr/webhooks/customers_redact"
 
   [[webhooks.subscriptions]]
+  compliance_topics = ["shop/redact"]
+  uri = "/gdpr/webhooks/shop_redact"
+
+  [[webhooks.subscriptions]]
   uri = "/webhooks/app/scopes_update"
   topics = [ "app/scopes_update" ]
 
