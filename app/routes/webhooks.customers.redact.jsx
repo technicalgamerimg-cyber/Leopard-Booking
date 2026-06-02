@@ -2,7 +2,14 @@ import { authenticate } from "../shopify.server";
 import db from "../db.server";
 
 export const action = async ({ request }) => {
-  const { shop, topic, payload } = await authenticate.webhook(request);
+  let shop, topic, payload;
+  try {
+    ({ shop, topic, payload } = await authenticate.webhook(request));
+  } catch (err) {
+    if (err instanceof Response) throw err;
+    console.error("[webhook] authenticate failed:", err);
+    return new Response("Bad Request", { status: 400 });
+  }
 
   console.log(`Received ${topic} webhook for ${shop}`);
 
