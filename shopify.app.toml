@@ -14,15 +14,15 @@ api_version = "2025-10"
 
   [[webhooks.subscriptions]]
   compliance_topics = ["customers/data_request"]
-  uri = "/gdpr/webhooks/customers_data_request"
+  uri = "/webhooks/customers/data_request"
 
   [[webhooks.subscriptions]]
   compliance_topics = ["customers/redact"]
-  uri = "/gdpr/webhooks/customers_redact"
+  uri = "/webhooks/customers/redact"
 
   [[webhooks.subscriptions]]
   compliance_topics = ["shop/redact"]
-  uri = "/gdpr/webhooks/shop_redact"
+  uri = "/webhooks/shop/redact"
 
   [[webhooks.subscriptions]]
   uri = "/webhooks/app/scopes_update"
