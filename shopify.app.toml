@@ -12,10 +12,13 @@ automatically_update_urls_on_dev = false
 [webhooks]
 api_version = "2025-10"
 
-  [webhooks.privacy_compliance]
-  customer_deletion_url = "/webhooks/customers/redact"
-  customer_data_request_url = "/webhooks/customers/data_request"
-  shop_deletion_url = "/webhooks/shop/redact"
+  [[webhooks.subscriptions]]
+  compliance_topics = ["customers/data_request"]
+  uri = "/gdpr/webhooks/customers_data_request"
+
+  [[webhooks.subscriptions]]
+  compliance_topics = ["customers/redact"]
+  uri = "/gdpr/webhooks/customers_redact"
 
   [[webhooks.subscriptions]]
   uri = "/webhooks/app/scopes_update"
