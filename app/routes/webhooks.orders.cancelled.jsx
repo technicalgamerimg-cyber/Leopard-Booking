@@ -4,14 +4,7 @@ import { LeopardApiClient } from "../integrations/leopards/client.server";
 import { getSettings } from "../services/settings.server";
 
 export const action = async ({ request }) => {
-  let shop, topic, payload;
-  try {
-    ({ shop, topic, payload } = await authenticate.webhook(request));
-  } catch (err) {
-    if (err instanceof Response) throw err;
-    console.error("[webhook] authenticate failed:", err);
-    return new Response("Bad Request", { status: 400 });
-  }
+  const { shop, topic, payload } = await authenticate.webhook(request);
 
   console.log(`Received ${topic} webhook for ${shop}`);
 
@@ -45,8 +38,8 @@ export const action = async ({ request }) => {
           cancelMessage = "Order cancelled in Shopify; Leopards cancel skipped (no credentials).";
         }
       } catch (err) {
-        console.error(`[${topic}] Leopards cancel error:`, err);
-        cancelMessage = `Order cancelled in Shopify; Leopards cancel errored: ${err.message}`;
+        console.error("webhook leopards cancel error", { topic, shop, error: err?.message });
+        cancelMessage = `Order cancelled in Shopify; Leopards cancel errored: ${err?.message ?? "unknown"}`;
       }
     }
 
@@ -66,7 +59,7 @@ export const action = async ({ request }) => {
       }),
     ]);
   } catch (err) {
-    console.error(`[${topic}] ${shop}:`, err);
+    console.error("webhook db error", { topic, shop, error: err?.message });
   }
 
   return new Response("OK", { status: 200 });
