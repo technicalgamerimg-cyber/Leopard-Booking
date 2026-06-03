@@ -8,7 +8,7 @@ import { getSettings, getCodKeywords } from "../services/settings.server";
 import { listOrders } from "../services/shopify-orders.server";
 import { bookOrder, bookOrdersBatch } from "../services/booking.server";
 
-// ── Visual design tokens ─────────────────────────────────────────────────────
+// ── Design tokens (match globals.css) ────────────────────────────────────────
 
 const STATUS_STYLES = {
   PENDING:    { dot: "#e8912d", bg: "#fff5ea", text: "#8a4b00",  label: "Not booked" },
@@ -62,14 +62,12 @@ function StatusPill({ status, hasError }) {
   const s   = STATUS_STYLES[key] ?? { dot: "#8c9196", bg: "#f6f6f7", text: "#444750", label: key };
   const isFailed = key === "FAILED";
   return (
-    <span style={{
-      display: "inline-flex", alignItems: "center", gap: 5,
-      padding: "3px 9px", borderRadius: 12,
-      background: s.bg, color: s.text,
-      fontSize: 12, fontWeight: 700, whiteSpace: "nowrap",
-      border: isFailed ? `1.5px solid ${s.dot}` : "1.5px solid transparent",
+    <span className="lb-pill" style={{
+      background: s.bg,
+      color: s.text,
+      borderColor: isFailed ? s.dot : "transparent",
     }}>
-      <span style={{ width: 6, height: 6, borderRadius: "50%", background: s.dot, flexShrink: 0 }} />
+      <span className="lb-pill-dot" style={{ background: s.dot }} />
       {s.label}
     </span>
   );
@@ -80,7 +78,7 @@ function FinancialBadge({ status }) {
   const style = FINANCIAL_STATUS_STYLES[key] ?? { bg: "#f6f6f7", text: "#444750" };
   const label = FINANCIAL_STATUS_LABELS[key] ?? (status ?? "—");
   return (
-    <span style={{ display: "inline-block", padding: "2px 7px", borderRadius: 10, fontSize: 11, fontWeight: 600, background: style.bg, color: style.text, whiteSpace: "nowrap" }}>
+    <span className="lb-pill" style={{ background: style.bg, color: style.text, fontSize: 11, borderColor: "transparent" }}>
       {label}
     </span>
   );
@@ -108,12 +106,25 @@ function ErrorDetail({ error }) {
   );
 }
 
-function BookingPanel({ order, fetcher, defaultWeightGrams, defaultSpecialInstructions, hasCredentials, disabled, onClose }) {
+// ── Booking Modal (replaces inline BookingPanel) ──────────────────────────────
+
+function BookingModal({ order, fetcher, defaultWeightGrams, defaultSpecialInstructions, hasCredentials, disabled, onClose }) {
   const [weight,       setWeight]       = useState(String(defaultWeightGrams));
   const [pieces,       setPieces]       = useState("1");
   const [cod,          setCod]          = useState(String(order.codAmount ?? 0));
   const [instructions, setInstructions] = useState(order.note || defaultSpecialInstructions || "Handle with care");
   const [errors,       setErrors]       = useState({});
+
+  // Trap escape key to close modal
+  useEffect(() => {
+    const handleEsc = (e) => { if (e.key === "Escape") onClose(); };
+    document.addEventListener("keydown", handleEsc);
+    document.body.classList.add("lb-modal-open");
+    return () => {
+      document.removeEventListener("keydown", handleEsc);
+      document.body.classList.remove("lb-modal-open");
+    };
+  }, [onClose]);
 
   function validate() {
     const e = {};
@@ -136,41 +147,79 @@ function BookingPanel({ order, fetcher, defaultWeightGrams, defaultSpecialInstru
   }
 
   return (
-    <div style={{ background: "#f9fafb", border: "1px solid #c9cccf", borderRadius: 8, padding: 20 }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 16 }}>
-        <div>
-          <div style={{ fontWeight: 700, fontSize: 15, color: "#202223" }}>Custom booking — {order.name}</div>
-          <div style={{ fontSize: 13, color: "#6d7175", marginTop: 3 }}>
-            {order.customerName}
-            {order.destinationCity ? ` · ${order.destinationCity}` : ""}
-            {order.codAmount > 0 ? ` · COD ${order.codAmount} ${order.currency}` : " · Prepaid"}
+    <div
+      className="lb-modal-backdrop"
+      onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="booking-modal-title"
+    >
+      <div className="lb-modal lb-modal-wide">
+        {/* Header */}
+        <div className="lb-modal-header">
+          <div>
+            <div id="booking-modal-title" className="lb-modal-title">
+              📦 Custom booking — {order.name}
+            </div>
+            <div className="lb-modal-subtitle">
+              {order.customerName}
+              {order.destinationCity ? ` · ${order.destinationCity}` : ""}
+              {order.codAmount > 0 ? ` · COD ${order.codAmount.toLocaleString()} ${order.currency}` : " · Prepaid"}
+            </div>
+          </div>
+          <button onClick={onClose} className="lb-modal-close" aria-label="Close">×</button>
+        </div>
+
+        {/* Body */}
+        <div className="lb-modal-body">
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 14, marginBottom: 14 }}>
+            <div className="lb-field">
+              <s-text-field
+                label="Weight (grams)"
+                value={weight}
+                onChange={(e) => setWeight(e.target?.value ?? weight)}
+              />
+              {errors.weight && <span className="lb-error-text">{errors.weight}</span>}
+            </div>
+            <div className="lb-field">
+              <s-text-field
+                label="Pieces"
+                value={pieces}
+                onChange={(e) => setPieces(e.target?.value ?? pieces)}
+              />
+              {errors.pieces && <span className="lb-error-text">{errors.pieces}</span>}
+            </div>
+            <div className="lb-field">
+              <s-text-field
+                label="COD amount (PKR)"
+                value={cod}
+                onChange={(e) => setCod(e.target?.value ?? cod)}
+                helpText="0 = prepaid"
+              />
+              {errors.cod && <span className="lb-error-text">{errors.cod}</span>}
+            </div>
+          </div>
+          <div style={{ marginBottom: 4 }}>
+            <s-text-field
+              label="Special instructions"
+              value={instructions}
+              onChange={(e) => setInstructions(e.target?.value ?? instructions)}
+            />
           </div>
         </div>
-        <button onClick={onClose} style={{ background: "none", border: "none", cursor: "pointer", fontSize: 22, color: "#6d7175", padding: "0 4px", lineHeight: 1 }} aria-label="Close">×</button>
-      </div>
 
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 12, marginBottom: 12 }}>
-        <div>
-          <s-text-field label="Weight (grams)" value={weight} onChange={(e) => setWeight(e.target?.value ?? weight)} />
-          {errors.weight && <div style={{ fontSize: 11, color: "#d72c0d", marginTop: 2 }}>{errors.weight}</div>}
+        {/* Footer */}
+        <div className="lb-modal-footer">
+          <s-button onClick={onClose} disabled={disabled}>Cancel</s-button>
+          <s-button
+            variant="primary"
+            disabled={disabled || !hasCredentials}
+            loading={disabled}
+            onClick={handleSubmit}
+          >
+            Confirm booking
+          </s-button>
         </div>
-        <div>
-          <s-text-field label="Pieces" value={pieces} onChange={(e) => setPieces(e.target?.value ?? pieces)} />
-          {errors.pieces && <div style={{ fontSize: 11, color: "#d72c0d", marginTop: 2 }}>{errors.pieces}</div>}
-        </div>
-        <div>
-          <s-text-field label="COD amount (PKR)" value={cod} onChange={(e) => setCod(e.target?.value ?? cod)} helpText="0 = prepaid" />
-          {errors.cod && <div style={{ fontSize: 11, color: "#d72c0d", marginTop: 2 }}>{errors.cod}</div>}
-        </div>
-      </div>
-      <div style={{ marginBottom: 16 }}>
-        <s-text-field label="Special instructions" value={instructions} onChange={(e) => setInstructions(e.target?.value ?? instructions)} />
-      </div>
-      <div style={{ display: "flex", gap: 8 }}>
-        <s-button variant="primary" disabled={disabled || !hasCredentials} loading={disabled} onClick={handleSubmit}>
-          Confirm booking
-        </s-button>
-        <s-button onClick={onClose} disabled={disabled}>Cancel</s-button>
       </div>
     </div>
   );
@@ -261,14 +310,13 @@ export default function Orders() {
   const navigation = useNavigation();
   const shopify    = useAppBridge();
 
-  const [selectedIds,      setSelectedIds]      = useState(() => new Set());
-  const [bookingPanelOrder, setBookingPanelOrder] = useState(null);
-  const [fieldErrors,      setFieldErrors]      = useState(null);
-  const [batchResults,     setBatchResults]     = useState(null);
+  const [selectedIds,       setSelectedIds]       = useState(() => new Set());
+  const [bookingModalOrder, setBookingModalOrder]  = useState(null);
+  const [fieldErrors,       setFieldErrors]        = useState(null);
+  const [batchResults,      setBatchResults]       = useState(null);
   const prevFetcherData = useRef(null);
 
   const loading            = navigation.state === "loading";
-  // Any booking in flight → disable ALL book buttons to prevent double-booking
   const anyBookingInFlight = fetcher.state !== "idle";
   const isBatchSubmitting  = anyBookingInFlight && fetcher.formData?.get("intent") === "bookBatch";
 
@@ -288,7 +336,7 @@ export default function Orders() {
       setBatchResults(fetcher.data);
     }
     if (fetcher.data.ok) {
-      setBookingPanelOrder(null);
+      setBookingModalOrder(null);
       if (fetcher.formData?.get("intent") === "bookBatch") setSelectedIds(new Set());
     }
   }, [fetcher.data, fetcher.formData, shopify]);
@@ -301,29 +349,46 @@ export default function Orders() {
     });
   }
 
-  const bookableOrders      = orders.filter((o) => canBookOrder(o, hasCredentials));
-  const allVisibleSelected  = bookableOrders.length > 0 && bookableOrders.every((o) => selectedIds.has(o.id));
+  const bookableOrders     = orders.filter((o) => canBookOrder(o, hasCredentials));
+  const allVisibleSelected = bookableOrders.length > 0 && bookableOrders.every((o) => selectedIds.has(o.id));
 
   return (
     <s-page heading="Orders">
 
+      {/* ── Booking Modal (fixed overlay, not bottom of page) ── */}
+      {bookingModalOrder && (
+        <BookingModal
+          order={bookingModalOrder}
+          fetcher={fetcher}
+          defaultWeightGrams={defaultWeightGrams}
+          defaultSpecialInstructions={defaultSpecialInstructions}
+          hasCredentials={hasCredentials}
+          disabled={anyBookingInFlight}
+          onClose={() => setBookingModalOrder(null)}
+        />
+      )}
+
       {/* ── Setup warnings ── */}
       {!hasCredentials && (
         <s-section>
-          <div style={{ background: "#fff8ec", border: "1px solid #e8912d", borderRadius: 8, padding: "14px 18px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
+          <div className="lb-alert lb-alert-warning" style={{ justifyContent: "space-between", flexWrap: "wrap" }}>
             <div>
-              <div style={{ fontWeight: 700, fontSize: 14, color: "#5c3500" }}>Setup required before booking</div>
-              <div style={{ fontSize: 13, color: "#8a4b00", marginTop: 2 }}>Add your Leopards credentials, test the connection, refresh cities, and set your origin city.</div>
+              <div style={{ fontWeight: 700, fontSize: 14 }}>Setup required before booking</div>
+              <div style={{ fontSize: 13, marginTop: 2 }}>Add your Leopards credentials, test the connection, refresh cities, and set your origin city.</div>
             </div>
-            <a href="/app/settings" style={{ padding: "7px 14px", background: "#e8912d", color: "#fff", borderRadius: 6, fontSize: 13, fontWeight: 600, textDecoration: "none" }}>Open Settings →</a>
+            <a href="/app/settings" className="lb-btn lb-btn-primary" style={{ flexShrink: 0 }}>Open Settings →</a>
           </div>
         </s-section>
       )}
 
       {hasCredentials && !hasOriginCity && (
         <s-section>
-          <div style={{ background: "#fff8ec", border: "1px solid #e8912d", borderRadius: 8, padding: "12px 16px", fontSize: 13, color: "#8a4b00" }}>
-            ⚠️ Origin city not set — bookings will fail until you set it. <a href="/app/settings" style={{ color: "#5c6ac4", fontWeight: 600 }}>Open Settings →</a>
+          <div className="lb-alert lb-alert-warning">
+            <span>⚠️</span>
+            <span style={{ fontSize: 13 }}>
+              Origin city not set — bookings will fail until you set it.{" "}
+              <a href="/app/settings" style={{ color: "#5c6ac4", fontWeight: 600 }}>Open Settings →</a>
+            </span>
           </div>
         </s-section>
       )}
@@ -331,40 +396,39 @@ export default function Orders() {
       {/* ── Field validation errors ── */}
       {fieldErrors && (
         <s-section>
-          <div style={{ background: "#fce8e7", border: "1px solid #d72c0d", borderRadius: 8, padding: "14px 18px" }}>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
-              <div>
-                <div style={{ fontWeight: 700, fontSize: 14, color: "#7f0007", marginBottom: 8 }}>Fix these issues before booking:</div>
-                <ul style={{ margin: 0, paddingInlineStart: "1.25rem", display: "flex", flexDirection: "column", gap: 4 }}>
-                  {Object.entries(fieldErrors).map(([field, message]) => (
-                    <li key={field} style={{ fontSize: 13, color: "#7f0007" }}>
-                      <strong>{FIELD_LABELS[field] ?? field}:</strong> {String(message)}
-                    </li>
-                  ))}
-                </ul>
-              </div>
-              <button onClick={() => setFieldErrors(null)} style={{ background: "none", border: "none", cursor: "pointer", fontSize: 18, color: "#7f0007", padding: "0 4px", flexShrink: 0 }}>×</button>
+          <div className="lb-alert lb-alert-danger" style={{ position: "relative" }}>
+            <div style={{ flex: 1 }}>
+              <div style={{ fontWeight: 700, fontSize: 14, marginBottom: 8 }}>Fix these issues before booking:</div>
+              <ul style={{ margin: 0, paddingInlineStart: "1.25rem", display: "flex", flexDirection: "column", gap: 4 }}>
+                {Object.entries(fieldErrors).map(([field, message]) => (
+                  <li key={field} style={{ fontSize: 13 }}>
+                    <strong>{FIELD_LABELS[field] ?? field}:</strong> {String(message)}
+                  </li>
+                ))}
+              </ul>
             </div>
+            <button onClick={() => setFieldErrors(null)} className="lb-btn lb-btn-ghost lb-btn-sm" aria-label="Dismiss">×</button>
           </div>
         </s-section>
       )}
 
-      {/* ── Batch results (dismissable) ── */}
+      {/* ── Batch results ── */}
       {batchResults && (
         <s-section>
-          <div style={{ background: batchResults.ok ? "#e3f1df" : "#fce8e7", border: `1px solid ${batchResults.ok ? "#3d8b40" : "#d72c0d"}`, borderRadius: 8, padding: "14px 18px" }}>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 8 }}>
-              <div style={{ fontWeight: 700, fontSize: 14, color: batchResults.ok ? "#1e542a" : "#7f0007" }}>
-                {batchResults.message}
-              </div>
-              <button onClick={() => setBatchResults(null)} style={{ background: "none", border: "none", cursor: "pointer", fontSize: 18, color: batchResults.ok ? "#1e542a" : "#7f0007", padding: "0 4px", flexShrink: 0 }}>×</button>
+          <div
+            className={batchResults.ok ? "lb-alert lb-alert-success" : "lb-alert lb-alert-danger"}
+            style={{ flexDirection: "column", alignItems: "stretch" }}
+          >
+            <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8 }}>
+              <div style={{ fontWeight: 700, fontSize: 14 }}>{batchResults.message}</div>
+              <button onClick={() => setBatchResults(null)} className="lb-btn lb-btn-ghost lb-btn-sm" aria-label="Dismiss">×</button>
             </div>
             <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
               {batchResults.results?.map((r) => (
                 <div key={r.orderId} style={{ display: "flex", alignItems: "flex-start", gap: 8, fontSize: 13 }}>
-                  <span style={{ fontSize: 14, flexShrink: 0 }}>{r.ok ? "✅" : "❌"}</span>
-                  <span style={{ fontWeight: 600, color: "#202223", flexShrink: 0 }}>{r.orderName}:</span>
-                  <span style={{ color: r.ok ? "#1e542a" : "#7f0007" }}>{r.message}</span>
+                  <span style={{ flexShrink: 0 }}>{r.ok ? "✅" : "❌"}</span>
+                  <span style={{ fontWeight: 600, flexShrink: 0 }}>{r.orderName}:</span>
+                  <span>{r.message}</span>
                 </div>
               ))}
             </div>
@@ -388,8 +452,17 @@ export default function Orders() {
       {/* ── Batch action bar ── */}
       {selectedIds.size > 0 && (
         <s-section>
-          <div style={{ background: "#f0f0ff", border: "1px solid #5c6ac4", borderRadius: 8, padding: "12px 16px", display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
-            <div style={{ fontWeight: 600, fontSize: 14, color: "#3d3d8f" }}>
+          <div style={{
+            background: "#f0f0ff",
+            border: "1px solid #5c6ac4",
+            borderRadius: 8,
+            padding: "12px 16px",
+            display: "flex",
+            alignItems: "center",
+            gap: 12,
+            flexWrap: "wrap",
+          }}>
+            <div style={{ fontWeight: 600, fontSize: 14, color: "#3d3d8f", flex: 1 }}>
               {selectedIds.size} order{selectedIds.size !== 1 ? "s" : ""} selected
             </div>
             <s-button
@@ -415,18 +488,20 @@ export default function Orders() {
       {/* ── Orders table ── */}
       <s-section>
         {loading ? (
-          <div style={{ padding: "40px 20px", textAlign: "center", fontSize: 13, color: "#6d7175" }}>Loading orders…</div>
+          <div style={{ padding: "48px 20px", textAlign: "center", fontSize: 13, color: "#6d7175" }}>
+            Loading orders…
+          </div>
         ) : orders.length === 0 ? (
-          <div style={{ background: "#f6f6f7", border: "1px solid #e1e3e5", borderRadius: 8, padding: "48px 20px", textAlign: "center" }}>
-            <div style={{ fontSize: 36, marginBottom: 10 }}>🛒</div>
-            <div style={{ fontWeight: 700, fontSize: 15, color: "#202223", marginBottom: 4 }}>
+          <div className="lb-empty">
+            <span className="lb-empty-icon">🛒</span>
+            <div className="lb-empty-title">
               {query ? `No orders matching "${query}"` : "No orders found"}
             </div>
-            <div style={{ fontSize: 13, color: "#6d7175" }}>
+            <div className="lb-empty-desc">
               {query ? "Try a different search term." : "Orders from your Shopify store will appear here."}
             </div>
             {query && (
-              <a href="/app/orders" style={{ display: "inline-block", marginTop: 12, padding: "7px 16px", background: "#5c6ac4", color: "#fff", borderRadius: 6, fontSize: 13, fontWeight: 600, textDecoration: "none" }}>
+              <a href="/app/orders" className="lb-btn lb-btn-primary" style={{ display: "inline-flex", marginTop: 16 }}>
                 Clear search
               </a>
             )}
@@ -455,11 +530,10 @@ export default function Orders() {
             </s-table-header-row>
             <s-table-body>
               {orders.map((order) => {
-                const isBookable     = canBookOrder(order, hasCredentials);
-                const isBooked       = Boolean(order.cnNumber) && order.bookingStatus !== "CANCELLED";
-                const hasFailed      = Boolean(order.lastError) && order.bookingStatus === "PENDING";
-                // Disable THIS row's book button when any booking is in flight
-                const thisRowBusy    = anyBookingInFlight && fetcher.formData?.get("orderId") === order.id;
+                const isBookable  = canBookOrder(order, hasCredentials);
+                const isBooked    = Boolean(order.cnNumber) && order.bookingStatus !== "CANCELLED";
+                const hasFailed   = Boolean(order.lastError) && order.bookingStatus === "PENDING";
+                const thisRowBusy = anyBookingInFlight && fetcher.formData?.get("orderId") === order.id;
 
                 return (
                   <s-table-row key={order.id}>
@@ -472,7 +546,7 @@ export default function Orders() {
                     </s-table-cell>
 
                     <s-table-cell>
-                      <span style={{ fontWeight: 600, fontSize: 13, color: "#202223" }}>{order.name}</span>
+                      <span style={{ fontWeight: 700, fontSize: 13, color: "#202223" }}>{order.name}</span>
                     </s-table-cell>
 
                     <s-table-cell>
@@ -492,16 +566,16 @@ export default function Orders() {
 
                     <s-table-cell>
                       {order.codAmount > 0 ? (
-                        <span style={{ fontSize: 13, fontWeight: 600, color: "#202223" }}>
-                          {order.codAmount.toLocaleString()} <span style={{ fontWeight: 400, color: "#6d7175" }}>{order.currency}</span>
+                        <span style={{ fontSize: 13, fontWeight: 700, color: "#202223" }}>
+                          {order.codAmount.toLocaleString()}{" "}
+                          <span style={{ fontWeight: 400, color: "#6d7175", fontSize: 11 }}>{order.currency}</span>
                         </span>
                       ) : (
-                        <span style={{ fontSize: 12, color: "#8c9196" }}>Prepaid</span>
+                        <span style={{ fontSize: 12, color: "#8c9196", fontStyle: "italic" }}>Prepaid</span>
                       )}
                     </s-table-cell>
 
                     <s-table-cell>
-                      {/* CRITICAL UX: Failed state must look COMPLETELY different from clean Pending */}
                       <StatusPill status={order.bookingStatus} hasError={hasFailed} />
                       {hasFailed && <ErrorDetail error={order.lastError} />}
                     </s-table-cell>
@@ -511,10 +585,10 @@ export default function Orders() {
                         <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
                           {order.slipLink ? (
                             <s-link href={order.slipLink} target="_blank">
-                              <span style={{ fontFamily: "monospace", fontSize: 12 }}>{order.cnNumber}</span>
+                              <span className="lb-mono" style={{ fontSize: 12 }}>{order.cnNumber}</span>
                             </s-link>
                           ) : (
-                            <span style={{ fontSize: 12, fontFamily: "monospace", color: "#444750" }}>{order.cnNumber}</span>
+                            <span className="lb-mono" style={{ fontSize: 12, color: "#444750" }}>{order.cnNumber}</span>
                           )}
                           <span style={{ fontSize: 11, color: "#8c9196" }}>CN number</span>
                         </div>
@@ -536,16 +610,13 @@ export default function Orders() {
                             {hasFailed ? "Retry" : "Book"}
                           </s-button>
 
-                          {/* Options: visually separated with border, not adjacent */}
+                          {/* Options button → opens modal */}
                           {isBookable && !anyBookingInFlight && (
                             <button
-                              onClick={() => setBookingPanelOrder(bookingPanelOrder?.id === order.id ? null : order)}
-                              style={{
-                                background: "#fff", border: "1px solid #c9cccf", borderRadius: 5,
-                                padding: "5px 8px", cursor: "pointer", fontSize: 11, color: "#444750",
-                                whiteSpace: "nowrap", fontWeight: 500,
-                              }}
+                              onClick={() => setBookingModalOrder(bookingModalOrder?.id === order.id ? null : order)}
+                              className="lb-btn lb-btn-secondary lb-btn-sm"
                               title="Customize weight, COD, pieces"
+                              aria-label="Booking options"
                             >
                               ⚙ Options
                             </button>
@@ -560,21 +631,6 @@ export default function Orders() {
           </s-table>
         )}
       </s-section>
-
-      {/* ── Booking panel ── */}
-      {bookingPanelOrder && (
-        <s-section>
-          <BookingPanel
-            order={bookingPanelOrder}
-            fetcher={fetcher}
-            defaultWeightGrams={defaultWeightGrams}
-            defaultSpecialInstructions={defaultSpecialInstructions}
-            hasCredentials={hasCredentials}
-            disabled={anyBookingInFlight}
-            onClose={() => setBookingPanelOrder(null)}
-          />
-        </s-section>
-      )}
 
       {/* ── Pagination ── */}
       {orders.length > 0 && (pageInfo.hasNextPage || pageInfo.hasPreviousPage) && (

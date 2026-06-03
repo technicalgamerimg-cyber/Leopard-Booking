@@ -51,32 +51,15 @@ export const action = async ({ request }) => {
 function Toggle({ checked, onChange, label, description }) {
   return (
     <div style={{ display: "flex", alignItems: "flex-start", gap: 12 }}>
-      <div
+      <button
+        type="button"
+        className="lb-toggle"
+        style={{ background: checked ? "#5c6ac4" : "#c4cdd5", marginTop: 2 }}
         onClick={() => onChange(!checked)}
-        style={{
-          width: 44,
-          height: 24,
-          borderRadius: 12,
-          background: checked ? "#5c6ac4" : "#c4cdd5",
-          cursor: "pointer",
-          flexShrink: 0,
-          position: "relative",
-          transition: "background 0.2s",
-          marginTop: 2,
-        }}
+        aria-pressed={checked}
       >
-        <div style={{
-          position: "absolute",
-          top: 2,
-          left: checked ? 22 : 2,
-          width: 20,
-          height: 20,
-          borderRadius: "50%",
-          background: "#fff",
-          boxShadow: "0 1px 3px rgba(0,0,0,0.2)",
-          transition: "left 0.2s",
-        }} />
-      </div>
+        <div className="lb-toggle-thumb" style={{ left: checked ? 22 : 2 }} />
+      </button>
       <div>
         <div style={{ fontSize: 14, fontWeight: 600, color: "#202223", lineHeight: 1.3 }}>{label}</div>
         {description && <div style={{ fontSize: 12, color: "#6d7175", marginTop: 3 }}>{description}</div>}
@@ -87,18 +70,12 @@ function Toggle({ checked, onChange, label, description }) {
 
 function SettingsCard({ title, subtitle, children, danger }) {
   return (
-    <div style={{
-      background: "#fff",
-      border: `1px solid ${danger ? "#d72c0d" : "#e1e3e5"}`,
-      borderRadius: 8,
-      overflow: "hidden",
-      marginBottom: 16,
-    }}>
-      <div style={{ padding: "16px 20px", borderBottom: `1px solid ${danger ? "#fce8e7" : "#f1f2f4"}`, background: danger ? "#fce8e7" : "#f9fafb" }}>
+    <div className={`lb-settings-card${danger ? " lb-danger-zone" : ""}`}>
+      <div className="lb-settings-card-header">
         <div style={{ fontWeight: 700, fontSize: 14, color: danger ? "#7f0007" : "#202223" }}>{title}</div>
         {subtitle && <div style={{ fontSize: 12, color: danger ? "#b40007" : "#6d7175", marginTop: 2 }}>{subtitle}</div>}
       </div>
-      <div style={{ padding: "20px" }}>
+      <div className="lb-settings-card-body">
         {children}
       </div>
     </div>
@@ -107,8 +84,8 @@ function SettingsCard({ title, subtitle, children, danger }) {
 
 function StatusDot({ ok, label }) {
   return (
-    <div style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "4px 10px", borderRadius: 12, background: ok ? "#e3f1df" : "#f6f6f7", fontSize: 12, fontWeight: 600, color: ok ? "#1e542a" : "#6d7175" }}>
-      <span style={{ width: 7, height: 7, borderRadius: "50%", background: ok ? "#3d8b40" : "#c4cdd5" }} />
+    <div className="lb-status-dot" style={{ background: ok ? "#e3f1df" : "#f6f6f7", color: ok ? "#1e542a" : "#6d7175" }}>
+      <span style={{ width: 7, height: 7, borderRadius: "50%", background: ok ? "#3d8b40" : "#c4cdd5", flexShrink: 0 }} />
       {label}
     </div>
   );
@@ -162,19 +139,19 @@ export default function Settings() {
       {/* ── Setup progress ── */}
       {!allStepsDone && (
         <s-section heading="Setup checklist">
-          <div style={{ background: "#fff", border: "1px solid #e1e3e5", borderRadius: 8, padding: "16px 20px" }}>
+          <div className="lb-card">
             {[
               { done: step1Done, label: "Save your Leopards API credentials", anchor: "#credentials" },
               { done: step2Done, label: "Refresh the city list (required for city matching)", anchor: "#cities" },
               { done: step3Done, label: "Set your origin city and shipper details", anchor: "#defaults" },
             ].map((step, i) => (
-              <div key={i} style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 0", borderBottom: i < 2 ? "1px solid #f1f2f4" : "none" }}>
+              <div key={i} className="lb-list-row">
                 <span style={{ fontSize: 16, flexShrink: 0 }}>{step.done ? "✅" : "⬜"}</span>
                 <span style={{ fontSize: 14, color: step.done ? "#8c9196" : "#202223", textDecoration: step.done ? "line-through" : "none", flex: 1 }}>
                   {step.label}
                 </span>
                 {!step.done && (
-                  <a href={step.anchor} style={{ fontSize: 12, color: "#5c6ac4", fontWeight: 600, textDecoration: "none" }}>Fix →</a>
+                  <a href={step.anchor} style={{ fontSize: 12, color: "var(--lb-primary)", fontWeight: 600, textDecoration: "none" }}>Fix →</a>
                 )}
               </div>
             ))}

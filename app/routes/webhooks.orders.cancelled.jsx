@@ -1,9 +1,10 @@
-import { authenticate } from "../shopify.server";
+import { authenticate, unauthenticated } from "../shopify.server";
 import db from "../db.server";
 import { LeopardApiClient } from "../integrations/leopards/client.server";
 import { getSettings } from "../services/settings.server";
 import { isTerminal, canTransition } from "../lib/shipment-state-machine.server";
 import { withWebhookDedup } from "../lib/webhook-dedup.server";
+import { cancelFulfillmentInShopify } from "../services/shipment.server";
 
 export const action = async ({ request }) => {
   const { shop, topic, payload } = await authenticate.webhook(request);
@@ -65,6 +66,15 @@ export const action = async ({ request }) => {
           },
         }),
       ]);
+
+      // Cancel the Shopify fulfillment so tracking is cleared from the order.
+      // Non-fatal: failure here must not affect the 200 response to Shopify.
+      try {
+        const { admin } = await unauthenticated.admin(shop);
+        await cancelFulfillmentInShopify(admin, shopifyOrderId);
+      } catch (fulfillErr) {
+        console.warn("[webhook] orders/cancelled — fulfillment cancel failed:", fulfillErr?.message);
+      }
     });
   } catch (err) {
     console.error("[webhook] orders/cancelled error", { shop, error: err?.message });

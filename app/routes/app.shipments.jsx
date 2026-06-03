@@ -79,7 +79,7 @@ export const loader = async ({ request }) => {
 };
 
 export const action = async ({ request }) => {
-  const { session } = await authenticate.admin(request);
+  const { admin, session } = await authenticate.admin(request);
   const store    = await ensureStore(session);
   const formData = await request.formData();
   const intent   = formData.get("intent");
@@ -96,7 +96,7 @@ export const action = async ({ request }) => {
     return { ...await refreshShipmentStatusesByDateRange(store.id, fromDate, toDate), intent };
   }
   if (intent === "cancel" || intent === "cancelBatch") {
-    return { ...await cancelShipments(store.id, cnNumbers), intent };
+    return { ...await cancelShipments(store.id, cnNumbers, admin), intent };
   }
   return { ok: false, message: "Unknown action.", intent };
 };
@@ -107,14 +107,12 @@ function StatusPill({ status, hasError }) {
   const key = hasError && status === "PENDING" ? "FAILED" : status;
   const s   = STATUS_STYLES[key] ?? { dot: "#8c9196", bg: "#f6f6f7", text: "#444750", label: key };
   return (
-    <span style={{
-      display: "inline-flex", alignItems: "center", gap: 5,
-      padding: "3px 8px", borderRadius: 12,
-      background: s.bg, color: s.text,
-      fontSize: 12, fontWeight: 700, whiteSpace: "nowrap",
-      border: key === "FAILED" ? `1.5px solid ${s.dot}` : "1.5px solid transparent",
+    <span className="lb-pill" style={{
+      background: s.bg,
+      color: s.text,
+      borderColor: key === "FAILED" ? s.dot : "transparent",
     }}>
-      <span style={{ width: 6, height: 6, borderRadius: "50%", background: s.dot, flexShrink: 0 }} />
+      <span className="lb-pill-dot" style={{ background: s.dot }} />
       {s.label}
     </span>
   );
@@ -126,6 +124,47 @@ function buildPageQuery({ status, query, page }) {
   if (query)  p.set("query",  query);
   if (page > 1) p.set("page", String(page));
   return p.toString();
+}
+
+// ── Cancel Confirmation Modal ─────────────────────────────────────────────────
+
+function CancelModal({ title, message, onConfirm, onClose, loading }) {
+  useEffect(() => {
+    const handleEsc = (e) => { if (e.key === "Escape" && !loading) onClose(); };
+    document.addEventListener("keydown", handleEsc);
+    document.body.classList.add("lb-modal-open");
+    return () => {
+      document.removeEventListener("keydown", handleEsc);
+      document.body.classList.remove("lb-modal-open");
+    };
+  }, [onClose, loading]);
+
+  return (
+    <div
+      className="lb-modal-backdrop"
+      onClick={(e) => { if (e.target === e.currentTarget && !loading) onClose(); }}
+      role="dialog"
+      aria-modal="true"
+    >
+      <div className="lb-modal">
+        <div className="lb-modal-header">
+          <div>
+            <div className="lb-modal-title" style={{ color: "#7f0007" }}>⚠️ {title}</div>
+          </div>
+          <button onClick={onClose} className="lb-modal-close" disabled={loading} aria-label="Close">×</button>
+        </div>
+        <div className="lb-modal-body">
+          <p style={{ fontSize: 14, color: "#444750", margin: 0, lineHeight: 1.6 }}>{message}</p>
+        </div>
+        <div className="lb-modal-footer">
+          <s-button onClick={onClose} disabled={loading}>Go back</s-button>
+          <s-button tone="critical" onClick={onConfirm} disabled={loading} loading={loading}>
+            Yes, cancel
+          </s-button>
+        </div>
+      </div>
+    </div>
+  );
 }
 
 // ── Page ──────────────────────────────────────────────────────────────────────
@@ -141,7 +180,7 @@ export default function Shipments() {
   const revalidator = useRevalidator();
   const shopify    = useAppBridge();
 
-  const [cancelTarget,       setCancelTarget]       = useState(null);
+  const [cancelTarget,       setCancelTarget]       = useState(null);  // single CN
   const [selectedCns,        setSelectedCns]        = useState(() => new Set());
   const [batchCancelConfirm, setBatchCancelConfirm] = useState(false);
   const [fromDate,           setFromDate]           = useState(defaultFromDate);
@@ -153,6 +192,7 @@ export default function Shipments() {
   const isRefreshAll    = fetcher.state !== "idle" && fetcher.formData?.get("intent") === "refreshAll";
   const isRefreshByDate = fetcher.state !== "idle" && fetcher.formData?.get("intent") === "refreshByDate";
   const isBatchCancel   = fetcher.state !== "idle" && fetcher.formData?.get("intent") === "cancelBatch";
+  const isSingleCancel  = fetcher.state !== "idle" && fetcher.formData?.get("intent") === "cancel";
 
   useEffect(() => {
     if (!fetcher.data || fetcher.data === prevFetcherData.current) return;
@@ -176,12 +216,45 @@ export default function Shipments() {
   const selectableShipments   = shipments.filter((s) => s.cnNumber && !TERMINAL_STATUSES.includes(s.status));
   const allSelectableSelected = selectableShipments.length > 0 && selectableShipments.every((s) => selectedCns.has(s.cnNumber));
 
+  // ── CSV export: native <a> with download attribute for reliable cross-browser download
   const exportHref = `/app/shipments/export?${new URLSearchParams({ ...(status ? { status } : {}), ...(query ? { query } : {}) })}`;
   const startCount = total === 0 ? 0 : (page - 1) * perPage + 1;
   const endCount   = Math.min(page * perPage, total);
 
   return (
     <s-page heading="Shipments">
+
+      {/* ── Cancel Modals (centered overlays, not inline sections) ── */}
+      {cancelTarget && (
+        <CancelModal
+          title={`Cancel shipment ${cancelTarget}?`}
+          message="This will cancel the shipment with Leopards Courier and remove the tracking info from Shopify. This action cannot be undone."
+          loading={isSingleCancel}
+          onClose={() => !isSingleCancel && setCancelTarget(null)}
+          onConfirm={() =>
+            fetcher.submit(
+              { intent: "cancel", cnNumbers: cancelTarget },
+              { method: "post", action: "/app/shipments" },
+            )
+          }
+        />
+      )}
+
+      {batchCancelConfirm && (
+        <CancelModal
+          title={`Cancel ${selectedCns.size} shipment${selectedCns.size !== 1 ? "s" : ""}?`}
+          message={`This will cancel all ${selectedCns.size} selected shipments with Leopards Courier and remove their tracking info from Shopify. This action cannot be undone.`}
+          loading={isBatchCancel}
+          onClose={() => !isBatchCancel && setBatchCancelConfirm(false)}
+          onConfirm={() => {
+            setBatchCancelConfirm(false);
+            fetcher.submit(
+              { intent: "cancelBatch", cnNumbers: Array.from(selectedCns).join(",") },
+              { method: "post", action: "/app/shipments" },
+            );
+          }}
+        />
+      )}
 
       {/* ── Status tabs ── */}
       <s-section>
@@ -193,22 +266,26 @@ export default function Shipments() {
             const isActive = status === key;
             const style    = STATUS_STYLES[key];
             return (
-              <a key={key}
+              <a
+                key={key}
                 href={`/app/shipments?${buildPageQuery({ status: key, query, page: 1 })}`}
+                className={`lb-tab${isActive ? " lb-tab-active" : ""}`}
                 style={{
-                  display: "inline-flex", alignItems: "center", gap: 6,
-                  padding: "6px 12px", borderRadius: 20,
-                  fontSize: 13, fontWeight: isActive ? 700 : 500,
-                  textDecoration: "none",
-                  background: isActive ? (style?.bg ?? "#f0f0ff") : "#f6f6f7",
-                  color: isActive ? (style?.text ?? "#3d3d8f") : "#444750",
-                  border: isActive ? `1.5px solid ${style?.dot ?? "#5c6ac4"}` : "1.5px solid transparent",
+                  background:  isActive ? (style?.bg ?? "#f0f0ff") : "#f6f6f7",
+                  color:       isActive ? (style?.text ?? "#3d3d8f") : "#444750",
+                  borderColor: isActive ? (style?.dot ?? "#5c6ac4") : "transparent",
                 }}
               >
-                {key && style && <span style={{ width: 6, height: 6, borderRadius: "50%", background: style.dot }} />}
+                {key && style && <span className="lb-pill-dot" style={{ background: style.dot }} />}
                 {label}
                 {count > 0 && (
-                  <span style={{ fontSize: 11, fontWeight: 700, padding: "1px 6px", borderRadius: 10, background: isActive ? (style?.dot ?? "#5c6ac4") : "#e1e3e5", color: isActive ? "#fff" : "#444750" }}>
+                  <span
+                    className="lb-tab-count"
+                    style={{
+                      background: isActive ? (style?.dot ?? "#5c6ac4") : "#e1e3e5",
+                      color:      isActive ? "#fff" : "#444750",
+                    }}
+                  >
                     {count}
                   </span>
                 )}
@@ -226,60 +303,68 @@ export default function Shipments() {
             </div>
             <s-button type="submit">Search</s-button>
             {(status || query) && <s-button href="/app/shipments">Clear</s-button>}
-            <s-button href={exportHref}>Export CSV</s-button>
+            {/* 
+              Native <a> with download attribute — reliably triggers browser file download
+              across all browsers (unlike <s-button href> which may navigate instead)
+            */}
+            <a href={exportHref} download className="lb-export-btn">
+              ↓ Export CSV
+            </a>
           </div>
         </Form>
       </s-section>
 
-      {/* ── Sync tools — always visible, no hidden toggle ── */}
+      {/* ── Sync tools ── */}
       <s-section>
-        <div style={{ background: "#f9fafb", border: "1px solid #e1e3e5", borderRadius: 8, padding: "14px 16px" }}>
-          <div style={{ fontSize: 12, fontWeight: 600, color: "#6d7175", textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 12 }}>
-            Status synchronisation
+        <div className="lb-card">
+          <div className="lb-card-header">
+            <span className="lb-section-label">Status synchronisation</span>
           </div>
-          <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "flex-end" }}>
-            {/* Sync all active */}
-            <div>
-              <div style={{ fontSize: 12, color: "#6d7175", marginBottom: 6 }}>Sync all active shipments</div>
-              <s-button
-                variant="primary"
-                disabled={isRefreshAll}
-                loading={isRefreshAll}
-                onClick={() => fetcher.submit({ intent: "refreshAll" }, { method: "post", action: "/app/shipments" })}
-              >
-                Sync all statuses
-              </s-button>
-            </div>
-
-            <div style={{ width: 1, background: "#e1e3e5", alignSelf: "stretch", margin: "0 4px" }} />
-
-            {/* Sync by date range */}
-            <div>
-              <div style={{ fontSize: 12, color: "#6d7175", marginBottom: 6 }}>Sync by booking date range</div>
-              <div style={{ display: "flex", gap: 8, alignItems: "flex-end", flexWrap: "wrap" }}>
-                <div style={{ minWidth: 140 }}>
-                  <s-text-field
-                    label="From"
-                    type="date"
-                    value={fromDate}
-                    onChange={(e) => setFromDate(e.target?.value ?? e.currentTarget?.value ?? fromDate)}
-                  />
-                </div>
-                <div style={{ minWidth: 140 }}>
-                  <s-text-field
-                    label="To"
-                    type="date"
-                    value={toDate}
-                    onChange={(e) => setToDate(e.target?.value ?? e.currentTarget?.value ?? toDate)}
-                  />
-                </div>
+          <div className="lb-card-body">
+            <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "flex-end" }}>
+              {/* Sync all active */}
+              <div>
+                <div style={{ fontSize: 12, color: "#6d7175", marginBottom: 6 }}>Sync all active shipments</div>
                 <s-button
-                  disabled={isRefreshByDate}
-                  loading={isRefreshByDate}
-                  onClick={() => fetcher.submit({ intent: "refreshByDate", fromDate, toDate }, { method: "post", action: "/app/shipments" })}
+                  variant="primary"
+                  disabled={isRefreshAll}
+                  loading={isRefreshAll}
+                  onClick={() => fetcher.submit({ intent: "refreshAll" }, { method: "post", action: "/app/shipments" })}
                 >
-                  Sync range
+                  Sync all statuses
                 </s-button>
+              </div>
+
+              <div style={{ width: 1, background: "#e1e3e5", alignSelf: "stretch", margin: "0 4px" }} />
+
+              {/* Sync by date range */}
+              <div>
+                <div style={{ fontSize: 12, color: "#6d7175", marginBottom: 6 }}>Sync by booking date range</div>
+                <div style={{ display: "flex", gap: 8, alignItems: "flex-end", flexWrap: "wrap" }}>
+                  <div style={{ minWidth: 140 }}>
+                    <s-text-field
+                      label="From"
+                      type="date"
+                      value={fromDate}
+                      onChange={(e) => setFromDate(e.target?.value ?? e.currentTarget?.value ?? fromDate)}
+                    />
+                  </div>
+                  <div style={{ minWidth: 140 }}>
+                    <s-text-field
+                      label="To"
+                      type="date"
+                      value={toDate}
+                      onChange={(e) => setToDate(e.target?.value ?? e.currentTarget?.value ?? toDate)}
+                    />
+                  </div>
+                  <s-button
+                    disabled={isRefreshByDate}
+                    loading={isRefreshByDate}
+                    onClick={() => fetcher.submit({ intent: "refreshByDate", fromDate, toDate }, { method: "post", action: "/app/shipments" })}
+                  >
+                    Sync range
+                  </s-button>
+                </div>
               </div>
             </div>
           </div>
@@ -289,66 +374,30 @@ export default function Shipments() {
       {/* ── Batch action bar ── */}
       {selectedCns.size > 0 && (
         <s-section>
-          <div style={{ background: "#f0f0ff", border: "1px solid #5c6ac4", borderRadius: 8, padding: "12px 16px", display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
-            <div style={{ fontWeight: 600, fontSize: 14, color: "#3d3d8f" }}>{selectedCns.size} selected</div>
-            <s-button tone="critical" disabled={isBatchCancel} loading={isBatchCancel} onClick={() => setBatchCancelConfirm(true)}>
+          <div style={{
+            background: "#fff5f5",
+            border: "1px solid #fca5a5",
+            borderRadius: 8,
+            padding: "12px 16px",
+            display: "flex",
+            alignItems: "center",
+            gap: 12,
+            flexWrap: "wrap",
+          }}>
+            <div style={{ fontWeight: 600, fontSize: 14, color: "#7f0007", flex: 1 }}>
+              {selectedCns.size} shipment{selectedCns.size !== 1 ? "s" : ""} selected
+            </div>
+            <s-button
+              tone="critical"
+              disabled={isBatchCancel}
+              loading={isBatchCancel}
+              onClick={() => setBatchCancelConfirm(true)}
+            >
               Cancel {selectedCns.size} shipment{selectedCns.size !== 1 ? "s" : ""}
             </s-button>
-            <s-button onClick={() => setSelectedCns(new Set())} disabled={isBatchCancel}>Clear selection</s-button>
-          </div>
-        </s-section>
-      )}
-
-      {/* ── Batch cancel confirmation ── */}
-      {batchCancelConfirm && (
-        <s-section>
-          <div style={{ background: "#fce8e7", border: "1px solid #d72c0d", borderRadius: 8, padding: "16px 20px" }}>
-            <div style={{ fontWeight: 700, fontSize: 14, color: "#7f0007", marginBottom: 6 }}>
-              Cancel {selectedCns.size} shipment{selectedCns.size !== 1 ? "s" : ""}?
-            </div>
-            <div style={{ fontSize: 13, color: "#b40007", marginBottom: 12 }}>
-              This will cancel them with Leopards Courier and cannot be undone.
-            </div>
-            <div style={{ display: "flex", gap: 8 }}>
-              <s-button
-                tone="critical" disabled={isBatchCancel} loading={isBatchCancel}
-                onClick={() => {
-                  setBatchCancelConfirm(false);
-                  fetcher.submit(
-                    { intent: "cancelBatch", cnNumbers: Array.from(selectedCns).join(",") },
-                    { method: "post", action: "/app/shipments" },
-                  );
-                }}
-              >
-                Yes, cancel all
-              </s-button>
-              <s-button onClick={() => setBatchCancelConfirm(false)} disabled={isBatchCancel}>Go back</s-button>
-            </div>
-          </div>
-        </s-section>
-      )}
-
-      {/* ── Single cancel confirmation ── */}
-      {cancelTarget && (
-        <s-section>
-          <div style={{ background: "#fce8e7", border: "1px solid #d72c0d", borderRadius: 8, padding: "16px 20px" }}>
-            <div style={{ fontWeight: 700, fontSize: 14, color: "#7f0007", marginBottom: 6 }}>
-              Cancel shipment <span style={{ fontFamily: "monospace" }}>{cancelTarget}</span>?
-            </div>
-            <div style={{ fontSize: 13, color: "#b40007", marginBottom: 12 }}>
-              This will cancel it with Leopards Courier and cannot be undone.
-            </div>
-            <div style={{ display: "flex", gap: 8 }}>
-              <s-button
-                tone="critical"
-                disabled={submittingCn === cancelTarget}
-                loading={submittingCn === cancelTarget}
-                onClick={() => fetcher.submit({ intent: "cancel", cnNumbers: cancelTarget }, { method: "post", action: "/app/shipments" })}
-              >
-                Yes, cancel
-              </s-button>
-              <s-button onClick={() => setCancelTarget(null)} disabled={submittingCn === cancelTarget}>Go back</s-button>
-            </div>
+            <s-button onClick={() => setSelectedCns(new Set())} disabled={isBatchCancel}>
+              Clear selection
+            </s-button>
           </div>
         </s-section>
       )}
@@ -356,20 +405,22 @@ export default function Shipments() {
       {/* ── Table ── */}
       <s-section>
         {loading ? (
-          <div style={{ padding: "40px 20px", textAlign: "center", color: "#6d7175", fontSize: 13 }}>Loading shipments…</div>
+          <div style={{ padding: "48px 20px", textAlign: "center", color: "#6d7175", fontSize: 13 }}>
+            Loading shipments…
+          </div>
         ) : shipments.length === 0 ? (
-          <div style={{ background: "#f6f6f7", border: "1px solid #e1e3e5", borderRadius: 8, padding: "48px 20px", textAlign: "center" }}>
-            <div style={{ fontSize: 36, marginBottom: 10 }}>📭</div>
-            <div style={{ fontWeight: 700, fontSize: 15, color: "#202223", marginBottom: 4 }}>
+          <div className="lb-empty">
+            <span className="lb-empty-icon">📭</span>
+            <div className="lb-empty-title">
               {status || query ? "No shipments match this filter" : "No shipments yet"}
             </div>
-            <div style={{ fontSize: 13, color: "#6d7175" }}>
+            <div className="lb-empty-desc">
               {status && `Filtered by: ${STATUS_STYLES[status]?.label ?? status}.`}
               {query && ` Searching: "${query}".`}
               {!status && !query && "Booked orders will appear here."}
             </div>
             {(status || query) && (
-              <a href="/app/shipments" style={{ display: "inline-block", marginTop: 12, padding: "7px 16px", background: "#5c6ac4", color: "#fff", borderRadius: 6, fontSize: 13, fontWeight: 600, textDecoration: "none" }}>
+              <a href="/app/shipments" className="lb-btn lb-btn-primary" style={{ display: "inline-flex", marginTop: 16 }}>
                 Clear filters
               </a>
             )}
@@ -428,10 +479,10 @@ export default function Shipments() {
                       <s-table-cell>
                         {shipment.slipLink ? (
                           <s-link href={shipment.slipLink} target="_blank">
-                            <span style={{ fontFamily: "monospace", fontSize: 13 }}>{shipment.cnNumber}</span>
+                            <span className="lb-mono" style={{ fontSize: 13 }}>{shipment.cnNumber}</span>
                           </s-link>
                         ) : (
-                          <span style={{ fontFamily: "monospace", fontSize: 13, color: shipment.cnNumber ? "#202223" : "#8c9196" }}>
+                          <span className="lb-mono" style={{ fontSize: 13, color: shipment.cnNumber ? "#202223" : "#8c9196" }}>
                             {shipment.cnNumber || "—"}
                           </span>
                         )}
@@ -444,7 +495,10 @@ export default function Shipments() {
                             <div style={{ fontSize: 11, color: "#8c9196", marginTop: 2 }}>{shipment.leopardStatusRaw}</div>
                           )}
                           {hasFailed && (
-                            <div style={{ fontSize: 11, color: "#d72c0d", marginTop: 3, maxWidth: 180, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={shipment.lastError}>
+                            <div
+                              style={{ fontSize: 11, color: "#d72c0d", marginTop: 3, maxWidth: 180, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+                              title={shipment.lastError}
+                            >
                               {shipment.lastError}
                             </div>
                           )}
@@ -468,16 +522,20 @@ export default function Shipments() {
 
                       <s-table-cell>
                         {shipment.codAmount > 0 ? (
-                          <span style={{ fontSize: 13, fontWeight: 600, color: "#202223" }}>{shipment.codAmount.toLocaleString()}</span>
+                          <span style={{ fontSize: 13, fontWeight: 700, color: "#202223" }}>
+                            {shipment.codAmount.toLocaleString()}
+                          </span>
                         ) : (
-                          <span style={{ fontSize: 12, color: "#8c9196" }}>—</span>
+                          <span style={{ fontSize: 12, color: "#8c9196", fontStyle: "italic" }}>—</span>
                         )}
                       </s-table-cell>
 
                       <s-table-cell>
                         {relevantDate ? (
                           <div>
-                            <div style={{ fontSize: 13, color: "#202223" }}>{new Date(relevantDate).toLocaleDateString()}</div>
+                            <div style={{ fontSize: 13, color: "#202223" }}>
+                              {new Date(relevantDate).toLocaleDateString()}
+                            </div>
                             <div style={{ fontSize: 11, color: "#8c9196" }}>
                               {shipment.deliveredAt ? "delivered" : shipment.cancelledAt ? "cancelled" : "booked"}
                             </div>

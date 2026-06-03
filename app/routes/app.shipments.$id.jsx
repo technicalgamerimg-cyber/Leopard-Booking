@@ -59,7 +59,7 @@ export const loader = async ({ request, params }) => {
 };
 
 export const action = async ({ request, params }) => {
-  const { session } = await authenticate.admin(request);
+  const { admin, session } = await authenticate.admin(request);
   const store    = await ensureStore(session);
   const shipment = await getShipmentById(store.id, params.id);
 
@@ -71,19 +71,61 @@ export const action = async ({ request, params }) => {
 
   if (!cn) return { ok: false, message: "Shipment has no CN number." };
   if (intent === "refresh") return refreshShipmentStatuses(store.id, [cn]);
-  if (intent === "cancel")  return cancelShipments(store.id, [cn]);
+  if (intent === "cancel")  return cancelShipments(store.id, [cn], admin);
 
   return { ok: false, message: "Unknown action." };
 };
 
 // ── Helper components ─────────────────────────────────────────────────────────
 
+function CancelModal({ cnNumber, onConfirm, onClose, loading }) {
+  useEffect(() => {
+    const handleEsc = (e) => { if (e.key === "Escape" && !loading) onClose(); };
+    document.addEventListener("keydown", handleEsc);
+    document.body.classList.add("lb-modal-open");
+    return () => {
+      document.removeEventListener("keydown", handleEsc);
+      document.body.classList.remove("lb-modal-open");
+    };
+  }, [onClose, loading]);
+
+  return (
+    <div
+      className="lb-modal-backdrop"
+      onClick={(e) => { if (e.target === e.currentTarget && !loading) onClose(); }}
+      role="dialog"
+      aria-modal="true"
+    >
+      <div className="lb-modal">
+        <div className="lb-modal-header">
+          <div>
+            <div className="lb-modal-title" style={{ color: "#7f0007" }}>
+              ⚠️ Cancel shipment {cnNumber}?
+            </div>
+          </div>
+          <button onClick={onClose} className="lb-modal-close" disabled={loading} aria-label="Close">×</button>
+        </div>
+        <div className="lb-modal-body">
+          <p style={{ fontSize: 14, color: "#444750", margin: 0, lineHeight: 1.6 }}>
+            This will cancel the shipment with Leopards Courier and remove the tracking info from Shopify. This action cannot be undone.
+          </p>
+        </div>
+        <div className="lb-modal-footer">
+          <s-button onClick={onClose} disabled={loading}>Go back</s-button>
+          <s-button tone="critical" onClick={onConfirm} disabled={loading} loading={loading}>
+            Yes, cancel
+          </s-button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function StatusPill({ status }) {
-  const hasFailed = false; // detail page shows raw status only
   const s = STATUS_STYLES[status] ?? { dot: "#8c9196", bg: "#f6f6f7", text: "#444750", label: status };
   return (
-    <span style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "4px 10px", borderRadius: 14, background: s.bg, color: s.text, fontSize: 13, fontWeight: 700 }}>
-      <span style={{ width: 8, height: 8, borderRadius: "50%", background: s.dot, flexShrink: 0 }} />
+    <span className="lb-pill" style={{ background: s.bg, color: s.text, borderColor: "transparent", fontSize: 13 }}>
+      <span className="lb-pill-dot" style={{ background: s.dot }} />
       {s.label}
     </span>
   );
@@ -109,7 +151,7 @@ function EventLogBadge({ type }) {
   };
   const s = styles[type] || { bg: "#f6f6f7", text: "#444750" };
   return (
-    <span style={{ fontSize: 11, padding: "2px 7px", borderRadius: 10, background: s.bg, color: s.text, fontWeight: 600, flexShrink: 0 }}>
+    <span className="lb-pill" style={{ background: s.bg, color: s.text, borderColor: "transparent", flexShrink: 0 }}>
       {EVENT_LABELS[type] ?? type}
     </span>
   );
@@ -188,6 +230,18 @@ export default function ShipmentDetail() {
   return (
     <s-page heading={shipment.shopifyOrderName}>
 
+      {/* ── Cancel confirmation modal (centered overlay) ── */}
+      {confirmCancel && (
+        <CancelModal
+          cnNumber={shipment.cnNumber}
+          loading={busy && fetcher.formData?.get("intent") === "cancel"}
+          onClose={() => !busy && setConfirmCancel(false)}
+          onConfirm={() =>
+            fetcher.submit({ intent: "cancel" }, { method: "post" })
+          }
+        />
+      )}
+
       {/* ── Action bar ── */}
       <s-section>
         <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
@@ -219,36 +273,9 @@ export default function ShipmentDetail() {
       {/* ── Error banner ── */}
       {shipment.lastError && (
         <s-section>
-          <div style={{ background: "#fce8e7", border: "1px solid #d72c0d", borderRadius: 8, padding: "12px 16px" }}>
-            <div style={{ fontSize: 13, fontWeight: 700, color: "#7f0007", marginBottom: 4 }}>Last booking error</div>
-            <div style={{ fontSize: 13, color: "#7f0007", wordBreak: "break-word" }}>{shipment.lastError}</div>
-          </div>
-        </s-section>
-      )}
-
-      {/* ── Cancel confirmation ── */}
-      {confirmCancel && (
-        <s-section>
-          <div style={{ background: "#fce8e7", border: "1px solid #d72c0d", borderRadius: 8, padding: "16px 20px" }}>
-            <div style={{ fontWeight: 700, fontSize: 14, color: "#7f0007", marginBottom: 6 }}>
-              Cancel shipment <span style={{ fontFamily: "monospace" }}>{shipment.cnNumber}</span>?
-            </div>
-            <div style={{ fontSize: 13, color: "#b40007", marginBottom: 12 }}>
-              This will cancel it with Leopards Courier and cannot be undone.
-            </div>
-            <div style={{ display: "flex", gap: 8 }}>
-              <fetcher.Form method="post" style={{ display: "contents" }}>
-                <input type="hidden" name="intent" value="cancel" />
-                <s-button
-                  type="submit" tone="critical" disabled={busy}
-                  loading={busy && fetcher.formData?.get("intent") === "cancel"}
-                  onClick={() => setTimeout(() => setConfirmCancel(false), 0)}
-                >
-                  Yes, cancel
-                </s-button>
-              </fetcher.Form>
-              <s-button onClick={() => setConfirmCancel(false)} disabled={busy}>Go back</s-button>
-            </div>
+          <div className="lb-alert lb-alert-danger" style={{ flexDirection: "column", alignItems: "stretch" }}>
+            <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 4 }}>Last booking error</div>
+            <div style={{ fontSize: 13, wordBreak: "break-word" }}>{shipment.lastError}</div>
           </div>
         </s-section>
       )}
@@ -257,7 +284,7 @@ export default function ShipmentDetail() {
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(300px, 1fr))", gap: 0 }}>
 
         <s-section heading="Shipment details">
-          <div style={{ background: "#fff", border: "1px solid #e1e3e5", borderRadius: 8, padding: "20px" }}>
+          <div className="lb-card"><div className="lb-card-body">
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "16px 24px" }}>
               <DetailRow label="Order"       value={shipment.shopifyOrderName} />
               <DetailRow label="CN Number"   value={shipment.cnNumber} mono />
@@ -273,35 +300,34 @@ export default function ShipmentDetail() {
               {shipment.cancelledAt && <DetailRow label="Cancelled" value={new Date(shipment.cancelledAt).toLocaleString()} />}
             </div>
             {shipment.consigneeAddress && (
-              <div style={{ marginTop: 16, paddingTop: 16, borderTop: "1px solid #f1f2f4" }}>
-                <div style={{ fontSize: 11, color: "#8c9196", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 4 }}>Address</div>
-                <div style={{ fontSize: 14, color: "#444750" }}>{shipment.consigneeAddress}</div>
+              <div style={{ marginTop: 16, paddingTop: 16, borderTop: "1px solid var(--lb-border-light)" }}>
+                <div className="lb-section-label" style={{ marginBottom: 4 }}>Address</div>
+                <div style={{ fontSize: 14, color: "var(--lb-text-secondary)" }}>{shipment.consigneeAddress}</div>
               </div>
             )}
-          </div>
+          </div></div>
         </s-section>
 
         {/* ── Tracking timeline — loads async, never blocks page render ── */}
         <s-section heading="Tracking timeline">
           {!shipment.cnNumber ? (
-            <div style={{ background: "#f6f6f7", border: "1px solid #e1e3e5", borderRadius: 8, padding: "32px 20px", textAlign: "center" }}>
-              <div style={{ fontSize: 28, marginBottom: 8 }}>📍</div>
-              <div style={{ fontWeight: 600, fontSize: 14, color: "#202223" }}>No CN number yet</div>
-              <div style={{ fontSize: 13, color: "#6d7175", marginTop: 4 }}>Book the shipment to get a tracking number.</div>
+            <div className="lb-empty">
+              <span className="lb-empty-icon">📍</span>
+              <div className="lb-empty-title">No CN number yet</div>
+              <div className="lb-empty-desc">Book the shipment to get a tracking number.</div>
             </div>
           ) : trackingEvents === null ? (
-            // Loading skeleton — shown while async fetch is in progress
-            <div style={{ background: "#fff", border: "1px solid #e1e3e5", borderRadius: 8, padding: "0 20px" }}>
+            <div className="lb-card" style={{ padding: "0 20px" }}>
               <TrackingSkeleton />
             </div>
           ) : trackingEvents.length === 0 ? (
-            <div style={{ background: "#f6f6f7", border: "1px solid #e1e3e5", borderRadius: 8, padding: "32px 20px", textAlign: "center" }}>
-              <div style={{ fontSize: 28, marginBottom: 8 }}>📍</div>
-              <div style={{ fontWeight: 600, fontSize: 14, color: "#202223", marginBottom: 4 }}>No tracking events yet</div>
+            <div className="lb-empty">
+              <span className="lb-empty-icon">📍</span>
+              <div className="lb-empty-title">No tracking events yet</div>
               {trackingError ? (
-                <div style={{ fontSize: 12, color: "#d72c0d", marginTop: 4 }}>{trackingError}</div>
+                <div style={{ fontSize: 12, color: "var(--lb-danger)", marginTop: 4 }}>{trackingError}</div>
               ) : (
-                <div style={{ fontSize: 13, color: "#6d7175" }}>Events will appear once the shipment is picked up.</div>
+                <div className="lb-empty-desc">Events will appear once the shipment is picked up.</div>
               )}
               <div style={{ marginTop: 12 }}>
                 <fetcher.Form method="post">
@@ -311,12 +337,12 @@ export default function ShipmentDetail() {
               </div>
             </div>
           ) : (
-            <div style={{ background: "#fff", border: "1px solid #e1e3e5", borderRadius: 8, padding: "0 20px" }}>
+            <div className="lb-card" style={{ padding: "0 20px" }}>
               {trackingEvents.map((event, i) => {
                 const isFirst = i === 0;
                 const isLast  = i === trackingEvents.length - 1;
                 return (
-                  <div key={event.id} style={{ display: "flex", gap: 14, padding: "16px 0", borderBottom: !isLast ? "1px solid #f1f2f4" : "none" }}>
+                  <div key={event.id} style={{ display: "flex", gap: 14, padding: "16px 0", borderBottom: !isLast ? "1px solid var(--lb-border-light)" : "none" }}>
                     <div style={{ display: "flex", flexDirection: "column", alignItems: "center", flexShrink: 0, width: 16 }}>
                       <div style={{
                         width: 12, height: 12, borderRadius: "50%",
@@ -331,13 +357,13 @@ export default function ShipmentDetail() {
                         {event.status}
                       </div>
                       {event.activityDate && (
-                        <div style={{ fontSize: 12, color: "#8c9196", marginTop: 2 }}>{event.activityDate}</div>
+                        <div style={{ fontSize: 12, color: "var(--lb-text-muted)", marginTop: 2 }}>{event.activityDate}</div>
                       )}
                       {event.reason && (
-                        <div style={{ fontSize: 12, color: "#6d7175", marginTop: 2 }}>{event.reason}</div>
+                        <div style={{ fontSize: 12, color: "var(--lb-text-muted)", marginTop: 2 }}>{event.reason}</div>
                       )}
                       {event.receiverName && (
-                        <div style={{ fontSize: 12, color: "#6d7175" }}>Receiver: {event.receiverName}</div>
+                        <div style={{ fontSize: 12, color: "var(--lb-text-muted)" }}>Receiver: {event.receiverName}</div>
                       )}
                     </div>
                   </div>
@@ -351,25 +377,25 @@ export default function ShipmentDetail() {
       {/* ── Activity log ── */}
       <s-section heading="Activity log">
         {shipment.logs.length === 0 ? (
-          <div style={{ background: "#f6f6f7", border: "1px solid #e1e3e5", borderRadius: 8, padding: "20px", textAlign: "center", fontSize: 13, color: "#6d7175" }}>
-            No events recorded.
+          <div className="lb-empty" style={{ padding: "20px", textAlign: "center" }}>
+            <div className="lb-empty-desc">No events recorded.</div>
           </div>
         ) : (
-          <div style={{ background: "#fff", border: "1px solid #e1e3e5", borderRadius: 8, overflow: "hidden" }}>
-            {shipment.logs.map((log, i) => (
-              <div key={log.id} style={{ display: "flex", alignItems: "flex-start", gap: 12, padding: "10px 16px", borderBottom: i < shipment.logs.length - 1 ? "1px solid #f1f2f4" : "none" }}>
+          <div className="lb-card">
+            {shipment.logs.map((log) => (
+              <div key={log.id} className="lb-list-row">
                 <EventLogBadge type={log.eventType} />
                 <div style={{ flex: 1, minWidth: 0 }}>
                   {log.message && <div style={{ fontSize: 13, color: "#202223" }}>{log.message}</div>}
                   {(log.fromStatus || log.toStatus) && (
-                    <div style={{ fontSize: 12, color: "#6d7175", marginTop: 2 }}>
+                    <div style={{ fontSize: 12, color: "var(--lb-text-muted)", marginTop: 2 }}>
                       {log.fromStatus && <span>{log.fromStatus}</span>}
                       {log.fromStatus && log.toStatus && <span> → </span>}
                       {log.toStatus && <span>{log.toStatus}</span>}
                     </div>
                   )}
                 </div>
-                <div style={{ fontSize: 11, color: "#8c9196", whiteSpace: "nowrap", flexShrink: 0 }}>
+                <div style={{ fontSize: 11, color: "var(--lb-text-muted)", whiteSpace: "nowrap", flexShrink: 0 }}>
                   {new Date(log.createdAt).toLocaleString()}
                 </div>
               </div>

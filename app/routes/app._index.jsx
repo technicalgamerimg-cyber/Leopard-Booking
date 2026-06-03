@@ -54,24 +54,10 @@ function formatRelative(iso) {
 
 function MetricCard({ label, value, color, sublabel, href }) {
   const inner = (
-    <div style={{
-      background: "#fff",
-      border: "1px solid #e1e3e5",
-      borderLeft: `4px solid ${color}`,
-      borderRadius: 8,
-      padding: "16px 18px",
-      height: "100%",
-      boxSizing: "border-box",
-    }}>
-      <div style={{ fontSize: 11, color: "#6d7175", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 8 }}>
-        {label}
-      </div>
-      <div style={{ fontSize: 34, fontWeight: 700, color: "#1a1c1e", lineHeight: 1 }}>
-        {value ?? 0}
-      </div>
-      {sublabel && (
-        <div style={{ fontSize: 12, color: "#6d7175", marginTop: 6 }}>{sublabel}</div>
-      )}
+    <div className="lb-metric-card" style={{ borderLeft: `4px solid ${color}` }}>
+      <div className="lb-metric-label">{label}</div>
+      <div className="lb-metric-value">{value ?? 0}</div>
+      {sublabel && <div className="lb-metric-sublabel">{sublabel}</div>}
     </div>
   );
   return href
@@ -81,21 +67,7 @@ function MetricCard({ label, value, color, sublabel, href }) {
 
 function QuickActionBtn({ href, children, primary }) {
   return (
-    <a
-      href={href}
-      style={{
-        display: "inline-block",
-        padding: "10px 20px",
-        background: primary ? "#5c6ac4" : "#fff",
-        color: primary ? "#fff" : "#202223",
-        border: primary ? "none" : "1px solid #c9cccf",
-        borderRadius: 6,
-        fontWeight: 600,
-        fontSize: 14,
-        textDecoration: "none",
-        whiteSpace: "nowrap",
-      }}
-    >
+    <a href={href} className={`lb-quick-action${primary ? " lb-quick-action-primary" : ""}`}>
       {children}
     </a>
   );
@@ -245,7 +217,7 @@ export default function Dashboard() {
       {/* ── Shipment health bar ── */}
       {counts.total > 0 && (
         <s-section heading="Shipment health">
-          <div style={{ background: "#fff", border: "1px solid #e1e3e5", borderRadius: 8, padding: "16px 20px" }}>
+          <div className="lb-card"><div className="lb-card-body">
             {/* Stacked bar */}
             <div style={{ display: "flex", height: 10, borderRadius: 5, overflow: "hidden", marginBottom: 14, background: "#f1f2f4" }}>
               {[
@@ -275,7 +247,7 @@ export default function Dashboard() {
                 ) : null
               )}
             </div>
-          </div>
+          </div></div>
         </s-section>
       )}
 
@@ -292,21 +264,21 @@ export default function Dashboard() {
       {/* ── Recent activity feed ── */}
       <s-section heading="Recent activity">
         {recentLogs?.length ? (
-          <div style={{ background: "#fff", border: "1px solid #e1e3e5", borderRadius: 8, overflow: "hidden" }}>
-            {recentLogs.map((log, i) => {
+          <div className="lb-card">
+            {recentLogs.map((log) => {
               const badge = eventBadgeStyle(log.eventType);
               return (
-                <div key={log.id} style={{ display: "flex", alignItems: "flex-start", gap: 12, padding: "12px 16px", borderBottom: i < recentLogs.length - 1 ? "1px solid #f1f2f4" : "none" }}>
-                  <div style={{ width: 8, height: 8, borderRadius: "50%", background: eventDotColor(log.eventType), flexShrink: 0, marginTop: 5 }} />
+                <div key={log.id} className="lb-list-row">
+                  <span className="lb-timeline-dot" style={{ background: eventDotColor(log.eventType) }} />
                   <div style={{ flex: 1, minWidth: 0 }}>
                     <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
                       <span style={{ fontWeight: 600, fontSize: 13, color: "#202223" }}>{log.orderName}</span>
                       {log.cnNumber && (
-                        <span style={{ fontSize: 12, color: "#6d7175", fontFamily: "monospace", background: "#f6f6f7", padding: "1px 5px", borderRadius: 4 }}>
+                        <span className="lb-mono" style={{ fontSize: 12, color: "#6d7175", background: "#f6f6f7", padding: "1px 5px", borderRadius: 4 }}>
                           {log.cnNumber}
                         </span>
                       )}
-                      <span style={{ fontSize: 11, padding: "2px 7px", borderRadius: 10, background: badge.bg, color: badge.text, fontWeight: 600 }}>
+                      <span className="lb-pill" style={{ background: badge.bg, color: badge.text, borderColor: "transparent" }}>
                         {EVENT_LABELS[log.eventType] ?? log.eventType}
                       </span>
                     </div>
@@ -322,23 +294,20 @@ export default function Dashboard() {
                 </div>
               );
             })}
-            <div style={{ padding: "10px 16px", background: "#f6f6f7", borderTop: "1px solid #e1e3e5" }}>
-              <a href="/app/shipments" style={{ fontSize: 13, color: "#5c6ac4", fontWeight: 600, textDecoration: "none" }}>
+            <div style={{ padding: "10px 16px", background: "var(--lb-surface-muted)", borderTop: "1px solid var(--lb-border)" }}>
+              <a href="/app/shipments" style={{ fontSize: 13, color: "var(--lb-primary)", fontWeight: 600, textDecoration: "none" }}>
                 View all shipments →
               </a>
             </div>
           </div>
         ) : (
-          <div style={{ background: "#f6f6f7", border: "1px solid #e1e3e5", borderRadius: 8, padding: "40px 20px", textAlign: "center" }}>
-            <div style={{ fontSize: 36, marginBottom: 10 }}>📦</div>
-            <div style={{ fontWeight: 700, fontSize: 15, color: "#202223", marginBottom: 4 }}>No shipment activity yet</div>
-            <div style={{ fontSize: 13, color: "#6d7175", marginBottom: 16 }}>
+          <div className="lb-empty">
+            <span className="lb-empty-icon">📦</span>
+            <div className="lb-empty-title">No shipment activity yet</div>
+            <div className="lb-empty-desc" style={{ marginBottom: 16 }}>
               {isSetupComplete ? "Book your first order to see activity here." : "Complete setup first, then book your first order."}
             </div>
-            <a
-              href={isSetupComplete ? "/app/orders" : "/app/settings"}
-              style={{ padding: "8px 18px", background: "#5c6ac4", color: "#fff", borderRadius: 6, fontSize: 13, fontWeight: 600, textDecoration: "none" }}
-            >
+            <a href={isSetupComplete ? "/app/orders" : "/app/settings"} className="lb-btn lb-btn-primary">
               {isSetupComplete ? "Book an order" : "Open Settings"}
             </a>
           </div>
@@ -348,29 +317,30 @@ export default function Dashboard() {
       {/* ── Recent load sheets ── */}
       {recentLoadsheets?.length > 0 && (
         <s-section heading="Recent load sheets">
-          <div style={{ background: "#fff", border: "1px solid #e1e3e5", borderRadius: 8, overflow: "hidden" }}>
-            {recentLoadsheets.map((ls, i) => (
-              <div key={ls.id} style={{ display: "flex", alignItems: "center", gap: 12, padding: "12px 16px", borderBottom: i < recentLoadsheets.length - 1 ? "1px solid #f1f2f4" : "none" }}>
+          <div className="lb-card">
+            {recentLoadsheets.map((ls) => (
+              <div key={ls.id} className="lb-list-row">
                 <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ fontWeight: 600, fontSize: 13, color: "#202223", fontFamily: "monospace" }}>{ls.loadSheetId}</div>
+                  <div className="lb-mono" style={{ fontWeight: 600, fontSize: 13, color: "#202223" }}>{ls.loadSheetId}</div>
                   <div style={{ fontSize: 12, color: "#6d7175", marginTop: 2 }}>
                     {ls.cnCount} shipment{ls.cnCount !== 1 ? "s" : ""} · {new Date(ls.createdAt).toLocaleDateString()}
                   </div>
                 </div>
-                <span style={{ padding: "2px 8px", borderRadius: 12, fontSize: 11, fontWeight: 600, background: ls.status === "downloaded" ? "#e3f1df" : "#eaf4fb", color: ls.status === "downloaded" ? "#1e542a" : "#084e8a", whiteSpace: "nowrap" }}>
+                <span className="lb-pill" style={{ background: ls.status === "downloaded" ? "#e3f1df" : "#eaf4fb", color: ls.status === "downloaded" ? "#1e542a" : "#084e8a", borderColor: "transparent" }}>
                   {ls.status === "downloaded" ? "Downloaded" : "Generated"}
                 </span>
                 <button
                   onClick={() => handleDownload(ls.loadSheetId)}
                   disabled={downloadingId === ls.loadSheetId}
-                  style={{ padding: "6px 12px", background: "#fff", border: "1px solid #c9cccf", borderRadius: 6, fontSize: 12, fontWeight: 600, cursor: "pointer", color: "#202223", flexShrink: 0, opacity: downloadingId === ls.loadSheetId ? 0.6 : 1 }}
+                  className="lb-btn lb-btn-secondary lb-btn-sm"
+                  style={{ opacity: downloadingId === ls.loadSheetId ? 0.6 : 1 }}
                 >
                   {downloadingId === ls.loadSheetId ? "…" : "Download PDF"}
                 </button>
               </div>
             ))}
-            <div style={{ padding: "10px 16px", background: "#f6f6f7", borderTop: "1px solid #e1e3e5" }}>
-              <a href="/app/loadsheets" style={{ fontSize: 13, color: "#5c6ac4", fontWeight: 600, textDecoration: "none" }}>
+            <div style={{ padding: "10px 16px", background: "var(--lb-surface-muted)", borderTop: "1px solid var(--lb-border)" }}>
+              <a href="/app/loadsheets" style={{ fontSize: 13, color: "var(--lb-primary)", fontWeight: 600, textDecoration: "none" }}>
                 View all load sheets →
               </a>
             </div>

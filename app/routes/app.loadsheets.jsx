@@ -140,14 +140,14 @@ export default function Loadsheets() {
       {/* ── Generate section ── */}
       <s-section heading="Generate loadsheet">
         {eligibleShipments.length === 0 ? (
-          <div style={{ background: "#f6f6f7", border: "1px solid #e1e3e5", borderRadius: 8, padding: "40px 20px", textAlign: "center" }}>
-            <div style={{ fontSize: 36, marginBottom: 10 }}>📋</div>
-            <div style={{ fontWeight: 700, fontSize: 15, color: "#202223", marginBottom: 4 }}>No eligible shipments</div>
-            <div style={{ fontSize: 13, color: "#6d7175" }}>
+          <div className="lb-empty">
+            <span className="lb-empty-icon">📋</span>
+            <div className="lb-empty-title">No eligible shipments</div>
+            <div className="lb-empty-desc" style={{ marginBottom: 14 }}>
               Loadsheets can only include booked, active shipments (not Cancelled, Delivered, or Returned).
               Book some orders first, then return here.
             </div>
-            <a href="/app/orders" style={{ display: "inline-block", marginTop: 14, padding: "7px 16px", background: "#5c6ac4", color: "#fff", borderRadius: 6, fontSize: 13, fontWeight: 600, textDecoration: "none" }}>
+            <a href="/app/orders" className="lb-btn lb-btn-primary" style={{ display: "inline-flex", marginTop: 4 }}>
               Go to Orders →
             </a>
           </div>
@@ -160,26 +160,23 @@ export default function Loadsheets() {
                 <s-button onClick={allSelected ? deselectAll : selectAll} disabled={busy}>
                   {allSelected ? "Deselect all" : "Select all"}
                 </s-button>
-                <span style={{ fontSize: 13, color: "#6d7175" }}>
+                <span style={{ fontSize: 13, color: "var(--lb-text-muted)" }}>
                   {selectedCns.size} of {eligibleShipments.length} shipment{eligibleShipments.length !== 1 ? "s" : ""} selected
                 </span>
               </div>
 
-              {/* Shipment checkboxes */}
-              <div style={{ background: "#fff", border: "1px solid #e1e3e5", borderRadius: 8, overflow: "hidden" }}>
-                {eligibleShipments.map((shipment, i) => (
-                  <div
-                    key={shipment.id}
-                    style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 16px", borderBottom: i < eligibleShipments.length - 1 ? "1px solid #f1f2f4" : "none" }}
-                  >
+              {/* Shipment checklist */}
+              <div className="lb-card">
+                {eligibleShipments.map((shipment) => (
+                  <div key={shipment.id} className="lb-list-row">
                     <s-checkbox
                       checked={selectedCns.has(shipment.cnNumber)}
                       onChange={() => toggleCn(shipment.cnNumber)}
                       disabled={busy}
                     />
-                    <span style={{ fontWeight: 600, fontSize: 13, color: "#202223", fontFamily: "monospace" }}>{shipment.cnNumber}</span>
-                    <span style={{ fontSize: 13, color: "#6d7175" }}>{shipment.orderName}</span>
-                    <span style={{ marginLeft: "auto", fontSize: 11, padding: "2px 7px", borderRadius: 10, background: "#eaf4fb", color: "#084e8a", fontWeight: 600 }}>
+                    <span className="lb-mono" style={{ fontWeight: 600, fontSize: 13, color: "#202223" }}>{shipment.cnNumber}</span>
+                    <span style={{ fontSize: 13, color: "var(--lb-text-muted)", flex: 1 }}>{shipment.orderName}</span>
+                    <span className="lb-pill" style={{ background: "#eaf4fb", color: "#084e8a", borderColor: "transparent" }}>
                       {shipment.status}
                     </span>
                   </div>
@@ -207,30 +204,30 @@ export default function Loadsheets() {
       {/* ── History section ── */}
       <s-section heading="History">
         {loadsheets.length === 0 ? (
-          <div style={{ background: "#f6f6f7", border: "1px solid #e1e3e5", borderRadius: 8, padding: "32px 20px", textAlign: "center" }}>
-            <div style={{ fontWeight: 600, fontSize: 14, color: "#202223", marginBottom: 4 }}>No load sheets yet</div>
-            <div style={{ fontSize: 13, color: "#6d7175" }}>
+          <div className="lb-empty">
+            <div className="lb-empty-title">No load sheets yet</div>
+            <div className="lb-empty-desc">
               Select booked shipments above and click Generate to create your first load sheet.
             </div>
           </div>
         ) : (
-          <div style={{ background: "#fff", border: "1px solid #e1e3e5", borderRadius: 8, overflow: "hidden" }}>
-            {loadsheets.map((loadsheet, i) => {
+          <div className="lb-card">
+            {loadsheets.map((loadsheet) => {
               const isExpanded = expandedLoadsheet === loadsheet.id;
               const isDownloading = downloadingId === loadsheet.id;
               return (
-                <div key={loadsheet.id} style={{ borderBottom: i < loadsheets.length - 1 ? "1px solid #f1f2f4" : "none" }}>
-                  <div style={{ display: "flex", alignItems: "center", gap: 12, padding: "12px 16px", flexWrap: "wrap" }}>
+                <div key={loadsheet.id} style={{ borderBottom: "1px solid var(--lb-border-light)" }}>
+                  <div className="lb-list-row" style={{ flexWrap: "wrap" }}>
                     {/* ID + meta */}
                     <div style={{ flex: 1, minWidth: 0 }}>
-                      <div style={{ fontWeight: 600, fontSize: 13, color: "#202223", fontFamily: "monospace" }}>{loadsheet.loadSheetId}</div>
-                      <div style={{ fontSize: 12, color: "#6d7175", marginTop: 2 }}>
+                      <div className="lb-mono" style={{ fontWeight: 600, fontSize: 13, color: "#202223" }}>{loadsheet.loadSheetId}</div>
+                      <div style={{ fontSize: 12, color: "var(--lb-text-muted)", marginTop: 2 }}>
                         {loadsheet.cnCount} shipment{loadsheet.cnCount !== 1 ? "s" : ""} · {new Date(loadsheet.createdAt).toLocaleString()}
                       </div>
                     </div>
 
                     {/* Status badge */}
-                    <span style={{ padding: "2px 8px", borderRadius: 12, fontSize: 11, fontWeight: 600, background: loadsheet.status === "downloaded" ? "#e3f1df" : "#eaf4fb", color: loadsheet.status === "downloaded" ? "#1e542a" : "#084e8a", whiteSpace: "nowrap" }}>
+                    <span className="lb-pill" style={{ background: loadsheet.status === "downloaded" ? "#e3f1df" : "#eaf4fb", color: loadsheet.status === "downloaded" ? "#1e542a" : "#084e8a", borderColor: "transparent" }}>
                       {loadsheet.status === "downloaded" ? "Downloaded" : "Generated"}
                     </span>
 
@@ -246,7 +243,7 @@ export default function Loadsheets() {
                     {/* Expand toggle */}
                     <button
                       onClick={() => setExpandedLoadsheet(isExpanded ? null : loadsheet.id)}
-                      style={{ background: "none", border: "1px solid #c9cccf", borderRadius: 6, padding: "5px 10px", cursor: "pointer", fontSize: 12, color: "#444750", whiteSpace: "nowrap" }}
+                      className="lb-btn lb-btn-secondary lb-btn-sm"
                     >
                       {isExpanded ? "▲ Hide" : "▼ Contents"}
                     </button>
@@ -254,11 +251,11 @@ export default function Loadsheets() {
 
                   {/* Expanded contents */}
                   {isExpanded && (
-                    <div style={{ padding: "0 16px 12px", display: "flex", flexDirection: "column", gap: 4 }}>
+                    <div style={{ padding: "4px 16px 12px", display: "flex", flexDirection: "column", gap: 6, background: "var(--lb-surface-muted)" }}>
                       {loadsheet.shipments.map((s, idx) => (
-                        <div key={`${s.cnNumber}-${idx}`} style={{ display: "flex", gap: 10, fontSize: 13, color: "#444750" }}>
-                          <span style={{ fontFamily: "monospace", color: "#202223", fontWeight: 600 }}>{s.cnNumber}</span>
-                          <span style={{ color: "#6d7175" }}>{s.orderName}</span>
+                        <div key={`${s.cnNumber}-${idx}`} style={{ display: "flex", gap: 12, fontSize: 13 }}>
+                          <span className="lb-mono" style={{ color: "#202223", fontWeight: 600 }}>{s.cnNumber}</span>
+                          <span style={{ color: "var(--lb-text-muted)" }}>{s.orderName}</span>
                         </div>
                       ))}
                     </div>

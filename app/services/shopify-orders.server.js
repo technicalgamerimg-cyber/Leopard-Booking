@@ -1,4 +1,10 @@
 import db from "../db.server";
+// ── Single Source of Truth for COD detection ──────────────────────────────────
+// isCodOrder / calculateCodAmount live in cod.server.js; import them here so
+// both the order-listing path and the webhook path always use identical logic.
+import { isCodOrder } from "../lib/cod.server";
+
+// ── GraphQL fragments ─────────────────────────────────────────────────────────
 
 const ORDER_FIELDS = `#graphql
   id
@@ -9,6 +15,9 @@ const ORDER_FIELDS = `#graphql
   phone
   email
   totalPriceSet {
+    shopMoney { amount currencyCode }
+  }
+  currentTotalPriceSet {
     shopMoney { amount currencyCode }
   }
   customer {
@@ -57,51 +66,48 @@ const ORDER_BY_ID_QUERY = `#graphql
 
 const DEFAULT_COD_KEYWORDS = ["cod", "cash on delivery"];
 
-function isCodOrder(order, codKeywords = DEFAULT_COD_KEYWORDS) {
-  const gatewayText = (order.paymentGatewayNames ?? []).join(" ").toLowerCase();
-  // If no gateway info at all, treat as COD (safer default for Pakistani stores).
-  if (!gatewayText) return true;
-  // If any keyword matches, it's COD.
-  if (codKeywords.some((keyword) => keyword && gatewayText.includes(keyword))) return true;
-  // If paid online (card/bank), it's NOT COD.
-  const onlineKeywords = ["visa", "mastercard", "stripe", "paypal", "bank", "credit", "debit", "online"];
-  if (onlineKeywords.some((k) => gatewayText.includes(k))) return false;
-  // Default to COD for unknown gateways.
-  return true;
-}
+// ── Order shaping ─────────────────────────────────────────────────────────────
 
 export function shapeOrder(order, shipment = null, defaultWeightGrams = 1000, codKeywords = DEFAULT_COD_KEYWORDS) {
   const shipping = order.shippingAddress ?? {};
-  const total = order.totalPriceSet?.shopMoney;
-  // totalPriceSet.shopMoney.amount is a string like "1500.00" — parse and round.
-  const rawAmount = parseFloat(total?.amount ?? "0");
-  const codAmount = isCodOrder(order, codKeywords)
-    ? Math.round(isNaN(rawAmount) ? 0 : rawAmount)
+
+  // currentTotalPriceSet reflects post-booking edits and partial refunds.
+  // It equals: product subtotal + shipping charges + taxes − all discounts.
+  // Falls back to totalPriceSet (original order total) when not available.
+  const currentTotal = order.currentTotalPriceSet?.shopMoney;
+  const originalTotal = order.totalPriceSet?.shopMoney;
+  const effectiveTotal = currentTotal ?? originalTotal;
+
+  const rawAmount = parseFloat(effectiveTotal?.amount ?? "0");
+  const codAmount = isCodOrder(order.paymentGatewayNames, codKeywords)
+    ? Math.round(Number.isFinite(rawAmount) ? rawAmount : 0)
     : 0;
 
   const isCancelledShipment = shipment?.status === "CANCELLED";
 
   return {
-    id: order.id,
-    name: order.name,
-    customerName: shipping.name ?? order.customer?.displayName ?? "Unknown customer",
-    customerEmail: order.customer?.email ?? order.email ?? "",
-    customerPhone: shipping.phone ?? order.customer?.phone ?? order.phone ?? "",
+    id:              order.id,
+    name:            order.name,
+    customerName:    shipping.name ?? order.customer?.displayName ?? "Unknown customer",
+    customerEmail:   order.customer?.email ?? order.email ?? "",
+    customerPhone:   shipping.phone ?? order.customer?.phone ?? order.phone ?? "",
     destinationCity: shipping.city ?? "",
     address: [shipping.address1, shipping.address2, shipping.city, shipping.province, shipping.zip]
       .filter(Boolean)
       .join(", "),
     financialStatus: order.displayFinancialStatus,
     codAmount,
-    currency: total?.currencyCode ?? "PKR",
-    weightGrams: defaultWeightGrams,
-    note: order.note ?? "",
+    currency:      effectiveTotal?.currencyCode ?? "PKR",
+    weightGrams:   defaultWeightGrams,
+    note:          order.note ?? "",
     bookingStatus: isCancelledShipment ? "PENDING" : shipment?.status ?? "PENDING",
-    cnNumber: isCancelledShipment ? "" : shipment?.cnNumber ?? "",
-    slipLink: isCancelledShipment ? "" : shipment?.slipLink ?? "",
-    lastError: shipment?.lastError ?? "",
+    cnNumber:      isCancelledShipment ? "" : shipment?.cnNumber ?? "",
+    slipLink:      isCancelledShipment ? "" : shipment?.slipLink ?? "",
+    lastError:     shipment?.lastError ?? "",
   };
 }
+
+// ── List orders (paginated) ───────────────────────────────────────────────────
 
 export async function listOrders({
   admin,
@@ -132,12 +138,12 @@ export async function listOrders({
 
   const edges = json.data?.orders?.edges ?? [];
   const pageInfo = json.data?.orders?.pageInfo ?? {
-    hasNextPage: false,
+    hasNextPage:     false,
     hasPreviousPage: false,
-    startCursor: null,
-    endCursor: null,
+    startCursor:     null,
+    endCursor:       null,
   };
-  const nodes = edges.map((edge) => edge.node);
+  const nodes    = edges.map((edge) => edge.node);
   const orderIds = nodes.map((order) => order.id);
   const shipments = orderIds.length
     ? await db.shipment.findMany({
@@ -156,6 +162,8 @@ export async function listOrders({
     pageInfo,
   };
 }
+
+// ── Get single order ──────────────────────────────────────────────────────────
 
 export async function getOrder({
   admin,

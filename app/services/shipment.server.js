@@ -9,6 +9,38 @@ import {
   TERMINAL_STATUSES,
 } from "../lib/shipment-state-machine.server";
 
+// ── Shopify fulfillment cancellation GraphQL ──────────────────────────────────
+
+const GET_ORDER_FULFILLMENTS_QUERY = `#graphql
+  query GetOrderFulfillments($orderId: ID!) {
+    order(id: $orderId) {
+      fulfillments(first: 10) {
+        id
+        status
+        trackingInfo { number }
+      }
+    }
+  }
+`;
+
+const FULFILLMENT_CANCEL_MUTATION = `#graphql
+  mutation FulfillmentCancel($id: ID!) {
+    fulfillmentCancel(id: $id) {
+      fulfillment { id status }
+      userErrors { field message }
+    }
+  }
+`;
+
+const FULFILLMENT_TRACKING_UPDATE_MUTATION = `#graphql
+  mutation FulfillmentTrackingInfoUpdateV2($fulfillmentId: ID!, $trackingInfoInput: FulfillmentTrackingInput!, $notifyCustomer: Boolean) {
+    fulfillmentTrackingInfoUpdateV2(fulfillmentId: $fulfillmentId, trackingInfoInput: $trackingInfoInput, notifyCustomer: $notifyCustomer) {
+      fulfillment { id status }
+      userErrors { field message }
+    }
+  }
+`;
+
 // ── Listing / export ─────────────────────────────────────────────────────────
 
 export async function listShipments(storeId, status = "", query = "", page = 1, perPage = 50) {
@@ -75,7 +107,81 @@ export async function purgeOldLogs({ apiLogDays = 30, webhookLogDays = 30 } = {}
 
 // ── Cancellation ─────────────────────────────────────────────────────────────
 
-export async function cancelShipments(storeId, cnNumbers) {
+/**
+ * Cancels the Shopify fulfillment associated with a given Shopify order.
+ * - Clears tracking info first (so the customer doesn't see stale tracking).
+ * - Then cancels the fulfillment itself.
+ * Non-fatal: errors are logged but never thrown to callers.
+ *
+ * @param {object} admin  - Shopify Admin API client (from authenticate.admin)
+ * @param {string} shopifyOrderId - e.g. "gid://shopify/Order/12345"
+ */
+export async function cancelFulfillmentInShopify(admin, shopifyOrderId) {
+  try {
+    // 1. Fetch active fulfillments for the order
+    const foRes = await admin.graphql(GET_ORDER_FULFILLMENTS_QUERY, {
+      variables: { orderId: shopifyOrderId },
+    });
+    const foJson = await foRes.json();
+    const fulfillments = foJson.data?.order?.fulfillments ?? [];
+
+    // Only touch fulfillments that are still active (SUCCESS = fulfilled but not yet cancelled)
+    const activeFulfillments = fulfillments.filter(
+      (f) => f.status === "SUCCESS" || f.status === "OPEN",
+    );
+
+    for (const fulfillment of activeFulfillments) {
+      // Step A: Clear tracking info first
+      try {
+        const trackRes = await admin.graphql(FULFILLMENT_TRACKING_UPDATE_MUTATION, {
+          variables: {
+            fulfillmentId:    fulfillment.id,
+            trackingInfoInput: { numbers: [], urls: [] },
+            notifyCustomer:   false,
+          },
+        });
+        const trackJson = await trackRes.json();
+        const trackErrors = trackJson.data?.fulfillmentTrackingInfoUpdateV2?.userErrors ?? [];
+        if (trackErrors.length) {
+          console.warn("[cancelFulfillmentInShopify] tracking clear errors:", JSON.stringify(trackErrors));
+        }
+      } catch (trackErr) {
+        console.warn("[cancelFulfillmentInShopify] tracking clear failed:", trackErr?.message);
+      }
+
+      // Step B: Cancel the fulfillment
+      try {
+        const cancelRes = await admin.graphql(FULFILLMENT_CANCEL_MUTATION, {
+          variables: { id: fulfillment.id },
+        });
+        const cancelJson = await cancelRes.json();
+        const cancelErrors = cancelJson.data?.fulfillmentCancel?.userErrors ?? [];
+        if (cancelErrors.length) {
+          console.warn("[cancelFulfillmentInShopify] cancel errors:", JSON.stringify(cancelErrors));
+        } else {
+          console.log(`[cancelFulfillmentInShopify] Cancelled fulfillment ${fulfillment.id} for order ${shopifyOrderId}`);
+        }
+      } catch (cancelErr) {
+        console.warn("[cancelFulfillmentInShopify] cancel failed:", cancelErr?.message);
+      }
+    }
+  } catch (err) {
+    // Never throw — fulfillment writeback failure must not block the app cancel flow
+    console.error("[cancelFulfillmentInShopify] Unexpected error:", err?.message);
+  }
+}
+
+/**
+ * Cancels one or more shipments with Leopards Courier and optionally in Shopify.
+ *
+ * @param {string}  storeId   - Internal store ID
+ * @param {string[]} cnNumbers - Leopards CN numbers to cancel
+ * @param {object}  [admin]   - Shopify Admin API client. When provided, Shopify
+ *                              fulfillments are also cancelled. When absent (e.g.
+ *                              called from a webhook context), Shopify writeback is
+ *                              skipped.
+ */
+export async function cancelShipments(storeId, cnNumbers, admin = null) {
   if (!cnNumbers?.length) {
     return { ok: false, message: "No CN numbers provided." };
   }
@@ -131,6 +237,17 @@ export async function cancelShipments(storeId, cnNumbers) {
       })),
     }),
   ]);
+
+  // ── Shopify fulfillment writeback (non-fatal, parallel) ──────────────────────
+  // When admin is provided (route context), cancel Shopify fulfillments + clear tracking.
+  // When absent (webhook context), skip silently.
+  if (admin) {
+    await Promise.allSettled(
+      cancellableShipments.map((s) =>
+        cancelFulfillmentInShopify(admin, s.shopifyOrderId),
+      ),
+    );
+  }
 
   return {
     ok:        true,
