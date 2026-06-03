@@ -3,13 +3,21 @@
   "buildCommand": "npm run setup && npm run build",
   "installCommand": "npm install",
   "framework": null,
+  "outputDirectory": "build/client",
   "functions": {
     "api/server.js": {
+      "includeFiles": "build/**",
       "maxDuration": 30,
       "memory": 1024
     }
   },
-  "rewrites": [
-    { "source": "/(.*)", "destination": "/api/server" }
+  "routes": [
+    {
+      "handle": "filesystem"
+    },
+    {
+      "src": "/(.*)",
+      "dest": "/api/server"
+    }
   ]
 }
