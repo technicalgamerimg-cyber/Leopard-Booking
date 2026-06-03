@@ -1,0 +1,1638 @@
+﻿===== booking.server.js =====
+import db from "../db.server";
+import { LeopardApiClient } from "../integrations/leopards/client.server";
+import {
+  normalizePhone,
+  parseNonNegativeInt,
+  parsePositiveInt,
+  validateBookingPayload,
+} from "../lib/validation.server";
+import { resolveCity } from "./city.server";
+import { getSettings, getCodKeywords } from "./settings.server";
+import { getOrder } from "./shopify-orders.server";
+
+const FULFILLMENT_ORDERS_QUERY = `#graphql
+  query FulfillmentOrdersForOrder($orderId: ID!) {
+    order(id: $orderId) {
+      fulfillmentOrders(first: 5) {
+        nodes {
+          id
+          status
+          supportedActions {
+            action
+          }
+        }
+      }
+    }
+  }
+`;
+
+const FULFILLMENT_CREATE_MUTATION = `#graphql
+  mutation FulfillmentCreate($fulfillment: FulfillmentInput!) {
+    fulfillmentCreate(fulfillment: $fulfillment) {
+      fulfillment {
+        id
+        status
+        trackingInfo {
+          number
+          url
+          company
+        }
+      }
+      userErrors {
+        field
+        message
+      }
+    }
+  }
+`;
+
+const ORDER_UPDATE_MUTATION = `#graphql
+  mutation OrderUpdate($input: OrderInput!) {
+    orderUpdate(input: $input) {
+      order {
+        id
+        note
+      }
+      userErrors {
+        field
+        message
+      }
+    }
+  }
+`;
+
+async function writeOrderNote(admin, orderId, cnNumber, existingNote = "") {
+  try {
+    const cnLine = `Leopards CN: ${cnNumber}`;
+    let updatedNote;
+    if (existingNote && /Leopards CN:/i.test(existingNote)) {
+      updatedNote = existingNote.replace(/Leopards CN:.*$/im, cnLine);
+    } else {
+      updatedNote = existingNote ? `${existingNote.trim()}\n${cnLine}` : cnLine;
+    }
+
+    const response = await admin.graphql(ORDER_UPDATE_MUTATION, {
+      variables: { input: { id: orderId, note: updatedNote } },
+    });
+    const json = await response.json();
+    const errors = json.data?.orderUpdate?.userErrors ?? [];
+    if (errors.length) {
+      console.error("[order note] orderUpdate errors:", JSON.stringify(errors));
+    } else {
+      console.log(`[order note] âœ… CN ${cnNumber} written to order note for ${orderId}`);
+    }
+  } catch (err) {
+    console.error("[order note] Unexpected error:", err);
+  }
+}
+
+async function writebackFulfillment(admin, orderId, cnNumber, slipLink, existingNote = "") {
+  try {
+    const foResponse = await admin.graphql(FULFILLMENT_ORDERS_QUERY, {
+      variables: { orderId },
+    });
+    const foJson = await foResponse.json();
+
+    console.log(
+      "[fulfillment writeback] fulfillmentOrders raw:",
+      JSON.stringify(foJson.data?.order?.fulfillmentOrders?.nodes ?? []),
+    );
+
+    const fulfillmentOrders =
+      foJson.data?.order?.fulfillmentOrders?.nodes ?? [];
+
+    // Prefer an FO where our token explicitly has CREATE_FULFILLMENT action;
+    // fall back to any OPEN FO for tokens that predate the
+    // write_merchant_managed_fulfillment_orders scope grant.
+    const openFo =
+      fulfillmentOrders.find((fo) =>
+        fo.supportedActions?.some((a) => a.action === "CREATE_FULFILLMENT"),
+      ) ?? fulfillmentOrders.find((fo) => fo.status === "OPEN");
+
+    if (!openFo) {
+      console.warn(
+        `[fulfillment writeback] No fulfillable order for ${orderId}. Statuses: ${
+          fulfillmentOrders.map((f) => `${f.status}[${f.supportedActions?.map((a) => a.action).join(",")}]`).join(", ") || "none"
+        }`,
+      );
+      return;
+    }
+
+    console.log(`[fulfillment writeback] Using fulfillment order ${openFo.id} status=${openFo.status}`);
+
+    const createResponse = await admin.graphql(FULFILLMENT_CREATE_MUTATION, {
+      variables: {
+        fulfillment: {
+          lineItemsByFulfillmentOrder: [{ fulfillmentOrderId: openFo.id }],
+          trackingInfo: {
+            number: cnNumber,
+            url: slipLink || `https://leopardscourier.com/track?cn=${cnNumber}`,
+            company: "Leopards Courier",
+          },
+          notifyCustomer: false,
+        },
+      },
+    });
+
+    const createJson = await createResponse.json();
+    console.log(
+      "[fulfillment writeback] fulfillmentCreate response:",
+      JSON.stringify(createJson.data?.fulfillmentCreate),
+    );
+
+    const errors = createJson.data?.fulfillmentCreate?.userErrors ?? [];
+    if (errors.length) {
+      console.error("[fulfillment writeback] fulfillmentCreate errors:", JSON.stringify(errors));
+      return;
+    }
+
+    const fulfillmentId = createJson.data?.fulfillmentCreate?.fulfillment?.id;
+    console.log(
+      `[fulfillment writeback] âœ… CN ${cnNumber} fulfilled on order ${orderId} â€” fulfillment ${fulfillmentId}`,
+    );
+
+    await writeOrderNote(admin, orderId, cnNumber, existingNote);
+  } catch (err) {
+    console.error("[fulfillment writeback] Unexpected error:", err);
+  }
+}
+
+function buildPayload(order, settings, destinationCity, overrides = {}) {
+  const weight = overrides.weightGrams ?? order.weightGrams;
+  const pieces = overrides.noOfPieces ?? 1;
+  const codAmount = overrides.codAmount ?? order.codAmount;
+  const specialInstructions =
+    overrides.specialInstructions ||
+    order.note ||
+    settings.defaultSpecialInstructions ||
+    "Handle with care";
+
+  return {
+    booked_packet_weight: weight,
+    booked_packet_no_piece: pieces,
+    booked_packet_collect_amount: codAmount,
+    origin_city: settings.originCityId || "self",
+    destination_city: destinationCity?.leopardCityId,
+    shipment_id: settings.defaultShipmentId || 1,
+    shipment_name_eng: settings.shipperName || "self",
+    shipment_email: settings.shipperEmail || "self",
+    shipment_phone: settings.shipperPhone || "self",
+    shipment_address: settings.shipperAddress || "self",
+    consignment_name_eng: order.customerName,
+    consignment_email: order.customerEmail,
+    consignment_phone: normalizePhone(order.customerPhone),
+    consignment_address: order.address,
+    special_instructions: specialInstructions,
+    booked_packet_order_id: order.name,
+  };
+}
+
+function extractBookingData(result) {
+  const data = Array.isArray(result.data) ? result.data[0] : result.data;
+  return {
+    trackNumber: data?.track_number ?? result.raw?.track_number,
+    slipLink: data?.slip_link ?? result.raw?.slip_link,
+    bookedPacketOrderId:
+      data?.booked_packet_order_id ?? result.raw?.booked_packet_order_id,
+  };
+}
+
+function parseOverrides(rawOverrides = {}) {
+  if (!rawOverrides) return {};
+  const weight = parsePositiveInt(rawOverrides.weightGrams);
+  const pieces = parsePositiveInt(rawOverrides.noOfPieces);
+  const cod = parseNonNegativeInt(rawOverrides.codAmount, null);
+
+  return {
+    weightGrams: weight ?? undefined,
+    noOfPieces: pieces ?? undefined,
+    codAmount: cod ?? undefined,
+    specialInstructions:
+      typeof rawOverrides.specialInstructions === "string"
+        ? rawOverrides.specialInstructions.trim() || undefined
+        : undefined,
+  };
+}
+
+export async function bookOrder({
+  admin,
+  storeId,
+  orderId,
+  overrides: rawOverrides = {},
+}) {
+  const settings = await getSettings(storeId, { decrypt: true });
+  const codKeywords = getCodKeywords(settings);
+  const overrides = parseOverrides(rawOverrides);
+
+  const existing = await db.shipment.findUnique({
+    where: {
+      storeId_shopifyOrderId: { storeId, shopifyOrderId: orderId },
+    },
+  });
+
+  if (existing && existing.status !== "CANCELLED") {
+    return { ok: false, message: "This order already has an active shipment." };
+  }
+
+  const order = await getOrder({
+    admin,
+    storeId,
+    orderId,
+    defaultWeightGrams: settings.defaultWeightGrams,
+    codKeywords,
+  });
+
+  if (!order) return { ok: false, message: "Shopify order was not found." };
+  if (!settings.leopardApiKey || !settings.leopardApiPassword) {
+    return { ok: false, message: "Save Leopards credentials before booking." };
+  }
+
+  const destinationCity = await resolveCity(storeId, order.destinationCity);
+  const payload = buildPayload(order, settings, destinationCity, overrides);
+  const validation = validateBookingPayload(payload);
+
+  if (!validation.ok) {
+    return {
+      ok: false,
+      message: "Fix the order data before booking.",
+      fieldErrors: validation.errors,
+    };
+  }
+
+  const client = new LeopardApiClient({ storeId, settings });
+  console.log(`[bookOrder] Booking ${order.name} | COD: ${payload.booked_packet_collect_amount} | City: ${payload.destination_city} | Weight: ${payload.booked_packet_weight}`);
+  const result = await client.bookPacket(payload);
+
+  if (!result.ok) {
+    await db.shipment.upsert({
+      where: {
+        storeId_shopifyOrderId: { storeId, shopifyOrderId: order.id },
+      },
+      create: {
+        storeId,
+        shopifyOrderId: order.id,
+        shopifyOrderName: order.name,
+        status: "PENDING",
+        codAmount: payload.booked_packet_collect_amount,
+        weightGrams: payload.booked_packet_weight,
+        noOfPieces: payload.booked_packet_no_piece,
+        destinationCityId: destinationCity?.leopardCityId,
+        consigneeName: order.customerName,
+        consigneePhone: order.customerPhone,
+        consigneeAddress: order.address,
+        lastError: result.message,
+      },
+      update: { lastError: result.message },
+    });
+    return result;
+  }
+
+  const booked = extractBookingData(result);
+  const shipment = await db.shipment.upsert({
+    where: {
+      storeId_shopifyOrderId: { storeId, shopifyOrderId: order.id },
+    },
+    create: {
+      storeId,
+      shopifyOrderId: order.id,
+      shopifyOrderName: order.name,
+      cnNumber: booked.trackNumber,
+      slipLink: booked.slipLink,
+      bookedPacketOrderId: booked.bookedPacketOrderId || order.name,
+      status: "BOOKED",
+      codAmount: payload.booked_packet_collect_amount,
+      weightGrams: payload.booked_packet_weight,
+      noOfPieces: payload.booked_packet_no_piece,
+      originCityId: settings.originCityId,
+      destinationCityId: destinationCity?.leopardCityId,
+      consigneeName: order.customerName,
+      consigneePhone: order.customerPhone,
+      consigneeAddress: order.address,
+      bookedAt: new Date(),
+    },
+    update: {
+      cnNumber: booked.trackNumber,
+      slipLink: booked.slipLink,
+      bookedPacketOrderId: booked.bookedPacketOrderId || order.name,
+      status: "BOOKED",
+      codAmount: payload.booked_packet_collect_amount,
+      weightGrams: payload.booked_packet_weight,
+      noOfPieces: payload.booked_packet_no_piece,
+      originCityId: settings.originCityId,
+      destinationCityId: destinationCity?.leopardCityId,
+      cancelledAt: null,
+      lastError: null,
+      bookedAt: new Date(),
+    },
+  });
+
+  await db.shipmentLog.create({
+    data: {
+      shipmentId: shipment.id,
+      eventType: "BOOKED",
+      toStatus: "BOOKED",
+      message: `Booked with CN ${booked.trackNumber}`,
+    },
+  });
+
+  if (booked.trackNumber && settings.fulfillmentWritebackEnabled) {
+    await writebackFulfillment(
+      admin,
+      order.id,
+      booked.trackNumber,
+      booked.slipLink,
+      order.note,
+    );
+  }
+
+  return {
+    ok: true,
+    message: `${order.name} booked with CN ${booked.trackNumber}`,
+    cnNumber: booked.trackNumber,
+    slipLink: booked.slipLink,
+  };
+}
+
+export async function bookOrdersBatch({ admin, storeId, orderIds }) {
+  if (!Array.isArray(orderIds) || orderIds.length === 0) {
+    return { ok: false, message: "Select at least one order to book." };
+  }
+
+  const settings = await getSettings(storeId, { decrypt: true });
+  if (!settings.leopardApiKey || !settings.leopardApiPassword) {
+    return { ok: false, message: "Save Leopards credentials before booking." };
+  }
+  const codKeywords = getCodKeywords(settings);
+
+  const results = [];
+  const packetsToBook = [];
+  const orderContext = [];
+
+  // Single batch DB query instead of N sequential findUnique calls.
+  const existingShipments = await db.shipment.findMany({
+    where: {
+      storeId,
+      shopifyOrderId: { in: orderIds },
+      status: { not: "CANCELLED" },
+    },
+    select: { shopifyOrderId: true, shopifyOrderName: true },
+  });
+  const bookedByOrderId = new Map(existingShipments.map((s) => [s.shopifyOrderId, s]));
+
+  const toFetch = orderIds.filter((id) => !bookedByOrderId.has(id));
+  for (const orderId of orderIds.filter((id) => bookedByOrderId.has(id))) {
+    const existing = bookedByOrderId.get(orderId);
+    results.push({ orderId, orderName: existing.shopifyOrderName, ok: false, message: "Already booked." });
+  }
+
+  if (!toFetch.length) {
+    return { ok: false, message: "No bookable orders selected.", results };
+  }
+
+  // Fetch all Shopify orders in parallel.
+  const fetchedOrders = await Promise.all(
+    toFetch.map((orderId) =>
+      getOrder({ admin, storeId, orderId, defaultWeightGrams: settings.defaultWeightGrams, codKeywords }),
+    ),
+  );
+
+  // Resolve all destination cities in parallel.
+  const resolvedCities = await Promise.all(
+    fetchedOrders.map((order) =>
+      order ? resolveCity(storeId, order.destinationCity) : Promise.resolve(null),
+    ),
+  );
+
+  for (let i = 0; i < toFetch.length; i++) {
+    const orderId = toFetch[i];
+    const order = fetchedOrders[i];
+    const destinationCity = resolvedCities[i];
+
+    if (!order) {
+      results.push({ orderId, orderName: orderId, ok: false, message: "Order not found in Shopify." });
+      continue;
+    }
+
+    const payload = buildPayload(order, settings, destinationCity);
+    const validation = validateBookingPayload(payload);
+
+    if (!validation.ok) {
+      results.push({
+        orderId,
+        orderName: order.name,
+        ok: false,
+        message: "Invalid order data: " + Object.keys(validation.errors).join(", "),
+        fieldErrors: validation.errors,
+      });
+      continue;
+    }
+
+    packetsToBook.push(payload);
+    orderContext.push({ order, destinationCity });
+  }
+
+  if (!packetsToBook.length) {
+    return {
+      ok: false,
+      message: "No bookable orders selected.",
+      results,
+    };
+  }
+
+  const client = new LeopardApiClient({ storeId, settings });
+  const result = await client.batchBookPacket(packetsToBook);
+
+  if (
+    !result.ok &&
+    !Array.isArray(result.data) &&
+    !Array.isArray(result.raw?.data)
+  ) {
+    // Total failure â€” surface the top-level error for each attempted order.
+    for (const { order } of orderContext) {
+      results.push({
+        orderId: order.id,
+        orderName: order.name,
+        ok: false,
+        message: result.message ?? "Batch booking failed.",
+      });
+    }
+    return {
+      ok: false,
+      message: result.message ?? "Batch booking failed.",
+      results,
+    };
+  }
+
+  const dataArr = Array.isArray(result.data)
+    ? result.data
+    : Array.isArray(result.raw?.data)
+      ? result.raw.data
+      : [];
+
+  // Correlate by position; also use booked_packet_order_id as a check.
+  for (let i = 0; i < orderContext.length; i += 1) {
+    const { order, destinationCity } = orderContext[i];
+    const item = dataArr[i];
+    const trackNumber = item?.track_number;
+    const slipLink = item?.slip_link;
+    const bookedPacketOrderId = item?.booked_packet_order_id;
+    const payload = packetsToBook[i];
+
+    if (!trackNumber) {
+      // Per-packet error
+      const itemError =
+        item?.error ??
+        result.raw?.error?.[`bookPacket - ${i}`] ??
+        "Leopards rejected this packet.";
+      await db.shipment.upsert({
+        where: {
+          storeId_shopifyOrderId: { storeId, shopifyOrderId: order.id },
+        },
+        create: {
+          storeId,
+          shopifyOrderId: order.id,
+          shopifyOrderName: order.name,
+          status: "PENDING",
+          codAmount: payload.booked_packet_collect_amount,
+          weightGrams: payload.booked_packet_weight,
+          destinationCityId: destinationCity?.leopardCityId,
+          consigneeName: order.customerName,
+          consigneePhone: order.customerPhone,
+          consigneeAddress: order.address,
+          lastError:
+            typeof itemError === "string"
+              ? itemError
+              : JSON.stringify(itemError),
+        },
+        update: {
+          lastError:
+            typeof itemError === "string"
+              ? itemError
+              : JSON.stringify(itemError),
+        },
+      });
+      results.push({
+        orderId: order.id,
+        orderName: order.name,
+        ok: false,
+        message: typeof itemError === "string" ? itemError : "Booking failed.",
+      });
+      continue;
+    }
+
+    const shipment = await db.shipment.upsert({
+      where: {
+        storeId_shopifyOrderId: { storeId, shopifyOrderId: order.id },
+      },
+      create: {
+        storeId,
+        shopifyOrderId: order.id,
+        shopifyOrderName: order.name,
+        cnNumber: trackNumber,
+        slipLink,
+        bookedPacketOrderId: bookedPacketOrderId || order.name,
+        status: "BOOKED",
+        codAmount: payload.booked_packet_collect_amount,
+        weightGrams: payload.booked_packet_weight,
+        originCityId: settings.originCityId,
+        destinationCityId: destinationCity?.leopardCityId,
+        consigneeName: order.customerName,
+        consigneePhone: order.customerPhone,
+        consigneeAddress: order.address,
+        bookedAt: new Date(),
+      },
+      update: {
+        cnNumber: trackNumber,
+        slipLink,
+        bookedPacketOrderId: bookedPacketOrderId || order.name,
+        status: "BOOKED",
+        codAmount: payload.booked_packet_collect_amount,
+        weightGrams: payload.booked_packet_weight,
+        originCityId: settings.originCityId,
+        destinationCityId: destinationCity?.leopardCityId,
+        cancelledAt: null,
+        lastError: null,
+        bookedAt: new Date(),
+      },
+    });
+
+    await db.shipmentLog.create({
+      data: {
+        shipmentId: shipment.id,
+        eventType: "BOOKED",
+        toStatus: "BOOKED",
+        message: `Booked with CN ${trackNumber}`,
+      },
+    });
+
+    // Write tracking back to Shopify if writeback is enabled.
+    if (trackNumber && settings.fulfillmentWritebackEnabled) {
+      await writebackFulfillment(admin, order.id, trackNumber, slipLink, order.note);
+    }
+
+    results.push({
+      orderId: order.id,
+      orderName: order.name,
+      cnNumber: trackNumber,
+      ok: true,
+      message: `Booked with CN ${trackNumber}`,
+    });
+  }
+
+  const successes = results.filter((r) => r.ok).length;
+  const failures = results.length - successes;
+
+  return {
+    ok: successes > 0,
+    message:
+      failures === 0
+        ? `${successes} order(s) booked.`
+        : `${successes} booked, ${failures} failed.`,
+    results,
+  };
+}
+
+===== city.server.js =====
+import db from "../db.server";
+import { normalizeCity } from "../lib/validation.server";
+import { getSettings } from "./settings.server";
+import { LeopardApiClient } from "../integrations/leopards/client.server";
+
+function extractCities(result) {
+  const source = result?.data?.city_list ?? result?.raw?.city_list ?? result?.data ?? [];
+  return Array.isArray(source) ? source : [];
+}
+
+export async function refreshCities(storeId) {
+  const settings = await getSettings(storeId, { decrypt: true });
+  const client = new LeopardApiClient({ storeId, settings });
+  const result = await client.getAllCities();
+
+  if (!result.ok) return result;
+
+  const cities = extractCities(result);
+  const validCities = cities.filter((city) => {
+    const id = Number(city.id ?? city.city_id ?? city.leopard_city_id);
+    const name = city.name ?? city.city_name ?? city.cityName;
+    return id && name;
+  });
+
+  if (!validCities.length) {
+    return { ok: false, message: "No valid cities returned by Leopards API." };
+  }
+
+  // Delete and recreate â€” fastest pattern for a periodic cache refresh.
+  // Avoids N+1 upserts across potentially hundreds of cities.
+  await db.$transaction([
+    db.cityCache.deleteMany({ where: { storeId } }),
+    db.cityCache.createMany({
+      data: validCities.map((city) => {
+        const id = Number(city.id ?? city.city_id ?? city.leopard_city_id);
+        const name = city.name ?? city.city_name ?? city.cityName;
+        return {
+          storeId,
+          leopardCityId: id,
+          name,
+          nameNormalized: normalizeCity(name),
+          refreshedAt: new Date(),
+        };
+      }),
+    }),
+  ]);
+
+  return { ok: true, message: `${validCities.length} cities refreshed.` };
+}
+
+export async function resolveCity(storeId, cityName) {
+  const normalized = normalizeCity(cityName);
+  if (!normalized) return null;
+
+  // 1. Exact normalized match â€” best.
+  const exact = await db.cityCache.findFirst({
+    where: { storeId, nameNormalized: normalized },
+  });
+  if (exact) return exact;
+
+  // 2. Prefix (startsWith) match â€” prefer "Lahore" over "Lahore Cantt" by sorting by name length ascending.
+  const startsWith = await db.cityCache.findMany({
+    where: { storeId, nameNormalized: { startsWith: normalized } },
+  });
+  if (startsWith.length) {
+    return startsWith.sort((a, b) => a.name.length - b.name.length)[0];
+  }
+
+  // 3. Contains (last-resort fuzzy match) â€” also prefer the shortest match.
+  const contains = await db.cityCache.findMany({
+    where: { storeId, nameNormalized: { contains: normalized } },
+  });
+  if (contains.length) {
+    return contains.sort((a, b) => a.name.length - b.name.length)[0];
+  }
+
+  return null;
+}
+
+export async function resolveCityName(storeId, leopardCityId) {
+  if (!leopardCityId) return null;
+  const city = await db.cityCache.findFirst({
+    where: { storeId, leopardCityId: Number(leopardCityId) },
+  });
+  return city?.name ?? null;
+}
+
+export async function batchResolveCityNames(storeId, cityIds) {
+  const unique = [...new Set((cityIds ?? []).filter(Boolean).map(Number))];
+  if (!unique.length) return new Map();
+  const rows = await db.cityCache.findMany({
+    where: { storeId, leopardCityId: { in: unique } },
+    select: { leopardCityId: true, name: true },
+  });
+  const map = new Map();
+  for (const row of rows) map.set(row.leopardCityId, row.name);
+  return map;
+}
+
+export async function listOriginCities(storeId) {
+  return db.cityCache.findMany({
+    where: { storeId, allowAsOrigin: true },
+    orderBy: { name: "asc" },
+  });
+}
+
+export async function getCityCacheStats(storeId) {
+  const stats = await db.cityCache.aggregate({
+    where: { storeId },
+    _count: { _all: true },
+    _max: { refreshedAt: true },
+  });
+  return {
+    count: stats._count._all,
+    lastRefreshedAt: stats._max.refreshedAt?.toISOString() ?? null,
+  };
+}
+
+===== dashboard.server.js =====
+import db from "../db.server";
+import { getSettings } from "./settings.server";
+
+export async function getDashboard(storeId) {
+  const todayStart = new Date();
+  todayStart.setHours(0, 0, 0, 0);
+
+  const [shipments, awaitingBooking, failedBookings, bookedToday, recentLogs, recentLoadsheets, settings] =
+    await Promise.all([
+      db.shipment.groupBy({
+        by: ["status"],
+        where: { storeId },
+        _count: { _all: true },
+      }),
+      db.shipment.count({
+        where: { storeId, status: "PENDING", cnNumber: null, lastError: null },
+      }),
+      db.shipment.count({
+        where: { storeId, status: "PENDING", lastError: { not: null } },
+      }),
+      db.shipment.count({
+        where: { storeId, status: "BOOKED", bookedAt: { gte: todayStart } },
+      }),
+      db.shipmentLog.findMany({
+        where: { shipment: { storeId } },
+        select: {
+          id: true,
+          eventType: true,
+          message: true,
+          createdAt: true,
+          shipment: { select: { shopifyOrderName: true, cnNumber: true } },
+        },
+        orderBy: { createdAt: "desc" },
+        take: 8,
+      }),
+      db.loadsheet.findMany({
+        where: { storeId },
+        orderBy: { createdAt: "desc" },
+        take: 5,
+      }),
+      getSettings(storeId),
+    ]);
+
+  const counts = {
+    total: 0,
+    PENDING: 0,
+    BOOKED: 0,
+    IN_TRANSIT: 0,
+    DELIVERED: 0,
+    RETURNED: 0,
+    CANCELLED: 0,
+    EXCEPTION: 0,
+  };
+
+  for (const row of shipments) {
+    counts[row.status] = row._count._all;
+    counts.total += row._count._all;
+  }
+
+  return {
+    counts,
+    awaitingBooking,
+    failedBookings,
+    bookedToday,
+    hasCredentials: Boolean(settings.hasCredentials),
+    hasOriginCity: Boolean(settings.originCityId),
+    recentLogs: recentLogs.map((log) => ({
+      id: log.id,
+      orderName: log.shipment.shopifyOrderName,
+      cnNumber: log.shipment.cnNumber,
+      eventType: log.eventType,
+      message: log.message,
+      createdAt: log.createdAt.toISOString(),
+    })),
+    recentLoadsheets: recentLoadsheets.map((ls) => ({
+      id: ls.id,
+      loadSheetId: ls.loadSheetId,
+      cnCount: ls.cnCount,
+      status: ls.status,
+      createdAt: ls.createdAt.toISOString(),
+    })),
+  };
+}
+
+===== loadsheet.server.js =====
+import db from "../db.server";
+import { LeopardApiClient } from "../integrations/leopards/client.server";
+import { getSettings } from "./settings.server";
+
+export async function listLoadsheets(storeId) {
+  return db.loadsheet.findMany({
+    where: { storeId },
+    orderBy: { createdAt: "desc" },
+    include: { shipments: { include: { shipment: true } } },
+    take: 100,
+  });
+}
+
+function extractLoadSheetId(result) {
+  return (
+    result.data?.load_sheet_id ??
+    result.raw?.load_sheet_id ??
+    result.data?.loadSheetId ??
+    result.raw?.loadSheetId
+  );
+}
+
+export async function generateLoadsheet(storeId, cnNumbers) {
+  const shipments = await db.shipment.findMany({
+    where: {
+      storeId,
+      cnNumber: { in: cnNumbers },
+      status: { notIn: ["CANCELLED", "DELIVERED", "RETURNED"] },
+    },
+  });
+
+  if (!shipments.length) {
+    return { ok: false, message: "Select booked, active shipments first." };
+  }
+
+  const settings = await getSettings(storeId, { decrypt: true });
+  const client = new LeopardApiClient({ storeId, settings });
+  const result = await client.generateLoadSheet(
+    shipments.map((shipment) => shipment.cnNumber),
+  );
+
+  if (!result.ok) return result;
+
+  const loadSheetId = String(extractLoadSheetId(result) ?? "");
+  if (!loadSheetId) {
+    return { ok: false, message: "Leopards did not return a loadsheet id." };
+  }
+
+  const loadsheet = await db.loadsheet.create({
+    data: {
+      storeId,
+      loadSheetId,
+      courierName: "Leopards Courier",
+      courierCode: "LCS",
+      cnCount: shipments.length,
+      shipments: {
+        create: shipments.map((shipment) => ({
+          shipmentId: shipment.id,
+        })),
+      },
+    },
+  });
+
+  await db.shipment.updateMany({
+    where: {
+      id: { in: shipments.map((shipment) => shipment.id) }
+    },
+    data: {
+      lastError: null,
+    }
+  });
+
+  return {
+    ok: true,
+    message: `Loadsheet ${loadsheet.loadSheetId} generated.`,
+    loadSheetId: loadsheet.loadSheetId,
+  };
+}
+
+export async function downloadLoadsheet(storeId, loadSheetId) {
+  const loadsheet = await db.loadsheet.findFirst({
+    where: { storeId, loadSheetId },
+  });
+
+  if (!loadsheet) {
+    return { ok: false, message: "Loadsheet not found." };
+  }
+
+  const settings = await getSettings(storeId, { decrypt: true });
+  const client = new LeopardApiClient({ storeId, settings });
+  const result = await client.downloadLoadSheet(loadSheetId);
+
+  if (!result.ok) return result;
+
+  await db.loadsheet.update({
+    where: { id: loadsheet.id },
+    data: { status: "downloaded" },
+  });
+
+  return result;
+}
+
+===== settings.server.js =====
+import db from "../db.server";
+import { decryptSecret, encryptSecret, maskSecret } from "../lib/crypto.server";
+import { normalizeString, parsePositiveInt } from "../lib/validation.server";
+import { LeopardApiClient } from "../integrations/leopards/client.server";
+
+const DEFAULT_COD_KEYWORDS = "cod,cash on delivery";
+
+function safeDecrypt(value) {
+  if (!value) return null;
+  try {
+    return decryptSecret(value);
+  } catch (err) {
+    console.error("[settings] failed to decrypt secret:", err.message);
+    return null;
+  }
+}
+
+function shapeSettings(settings) {
+  return {
+    ...settings,
+    leopardApiKeyMasked: maskSecret(settings.leopardApiKey),
+    leopardApiPasswordMasked: maskSecret(settings.leopardApiPassword),
+    hasCredentials: Boolean(
+      settings.leopardApiKey && settings.leopardApiPassword,
+    ),
+    codGatewayKeywords: settings.codGatewayKeywords ?? DEFAULT_COD_KEYWORDS,
+  };
+}
+
+export async function getSettings(storeId, { decrypt = false } = {}) {
+  let settings = await db.settings.findUnique({ where: { storeId } });
+  if (!settings) {
+    settings = await db.settings.create({
+      data: {
+        storeId,
+        defaultShipmentId: Number(process.env.LEOPARDS_DEFAULT_SHIPMENT_ID ?? 1),
+        defaultWeightGrams: Number(process.env.DEFAULT_PACKET_WEIGHT_GRAMS ?? 1000),
+        leopardEnvironment:
+          process.env.LEOPARDS_DEFAULT_ENVIRONMENT === "production"
+            ? "production"
+            : "staging",
+      },
+    });
+  }
+
+  if (!decrypt) {
+    return shapeSettings(settings);
+  }
+
+  return {
+    ...settings,
+    leopardApiKey: safeDecrypt(settings.leopardApiKey),
+    leopardApiPassword: safeDecrypt(settings.leopardApiPassword),
+    codGatewayKeywords: settings.codGatewayKeywords ?? DEFAULT_COD_KEYWORDS,
+  };
+}
+
+export function getCodKeywords(settings) {
+  const raw = settings?.codGatewayKeywords ?? DEFAULT_COD_KEYWORDS;
+  return raw
+    .split(",")
+    .map((keyword) => keyword.trim().toLowerCase())
+    .filter(Boolean);
+}
+
+export async function saveSettings(storeId, formData) {
+  const current = await getSettings(storeId);
+  const apiKey = normalizeString(formData.get("apiKey"));
+  const apiPassword = normalizeString(formData.get("apiPassword"));
+  const environment = formData.has("environment")
+    ? formData.get("environment") === "production"
+      ? "production"
+      : "staging"
+    : current.leopardEnvironment;
+
+  const data = {
+    leopardEnvironment: environment,
+    originCityId: formData.has("originCityId")
+      ? parsePositiveInt(formData.get("originCityId"))
+      : current.originCityId,
+    shipperName: formData.has("shipperName")
+      ? normalizeString(formData.get("shipperName")) || null
+      : current.shipperName,
+    shipperPhone: formData.has("shipperPhone")
+      ? normalizeString(formData.get("shipperPhone")) || null
+      : current.shipperPhone,
+    shipperEmail: formData.has("shipperEmail")
+      ? normalizeString(formData.get("shipperEmail")) || null
+      : current.shipperEmail,
+    shipperAddress: formData.has("shipperAddress")
+      ? normalizeString(formData.get("shipperAddress")) || null
+      : current.shipperAddress,
+    defaultShipmentId: formData.has("defaultShipmentId")
+      ? parsePositiveInt(
+          formData.get("defaultShipmentId"),
+          current.defaultShipmentId ?? 1,
+        )
+      : current.defaultShipmentId,
+    defaultWeightGrams: formData.has("defaultWeightGrams")
+      ? parsePositiveInt(
+          formData.get("defaultWeightGrams"),
+          current.defaultWeightGrams,
+        )
+      : current.defaultWeightGrams,
+    defaultSpecialInstructions: formData.has("defaultSpecialInstructions")
+      ? normalizeString(formData.get("defaultSpecialInstructions")) || null
+      : current.defaultSpecialInstructions,
+    fulfillmentWritebackEnabled: formData.has("fulfillmentWritebackEnabled")
+      ? formData.get("fulfillmentWritebackEnabled") === "on"
+      : current.fulfillmentWritebackEnabled,
+    codGatewayKeywords: formData.has("codGatewayKeywords")
+      ? normalizeString(formData.get("codGatewayKeywords")) || null
+      : current.codGatewayKeywords,
+  };
+
+  if (apiKey) data.leopardApiKey = encryptSecret(apiKey);
+  if (apiPassword) data.leopardApiPassword = encryptSecret(apiPassword);
+
+  await db.settings.update({ where: { storeId }, data });
+
+  return {
+    ok: true,
+    message:
+      current.hasCredentials || apiKey || apiPassword
+        ? "Settings saved."
+        : "Settings saved. Add Leopards credentials before booking shipments.",
+  };
+}
+
+export async function clearCredentials(storeId) {
+  await db.settings.update({
+    where: { storeId },
+    data: { leopardApiKey: null, leopardApiPassword: null },
+  });
+
+  return { ok: true, message: "Leopards credentials cleared." };
+}
+
+export async function testConnection(storeId) {
+  const settings = await getSettings(storeId, { decrypt: true });
+
+  if (!settings.leopardApiKey || !settings.leopardApiPassword) {
+    return { ok: false, message: "Enter and save Leopards credentials first." };
+  }
+
+  const client = new LeopardApiClient({ storeId, settings });
+  const result = await client.getAllCities();
+
+  if (!result.ok) return result;
+  return { ok: true, message: "Leopards API connection successful." };
+}
+
+===== shipment.server.js =====
+import db from "../db.server";
+import { LeopardApiClient } from "../integrations/leopards/client.server";
+import { mapLeopardStatus } from "../integrations/leopards/status-map.server";
+import { getSettings } from "./settings.server";
+
+const TERMINAL_STATUSES = ["DELIVERED", "CANCELLED", "RETURNED"];
+
+export async function listShipments(storeId, status = "", query = "", page = 1, perPage = 50) {
+  const where = {
+    storeId,
+    ...(status ? { status } : {}),
+    ...(query
+      ? {
+          OR: [
+            { cnNumber: { contains: query, mode: "insensitive" } },
+            { shopifyOrderName: { contains: query, mode: "insensitive" } },
+            { consigneeName: { contains: query, mode: "insensitive" } },
+          ],
+        }
+      : {}),
+  };
+
+  const safePage = Math.max(1, Number(page) || 1);
+  const safePerPage = Math.max(1, Math.min(200, Number(perPage) || 50));
+
+  const [shipments, total] = await Promise.all([
+    db.shipment.findMany({
+      where,
+      orderBy: { updatedAt: "desc" },
+      skip: (safePage - 1) * safePerPage,
+      take: safePerPage,
+    }),
+    db.shipment.count({ where }),
+  ]);
+
+  return {
+    shipments,
+    total,
+    page: safePage,
+    perPage: safePerPage,
+    pageCount: Math.max(1, Math.ceil(total / safePerPage)),
+  };
+}
+
+export async function listShipmentsForExport(storeId, status = "", query = "") {
+  const where = {
+    storeId,
+    ...(status ? { status } : {}),
+    ...(query
+      ? {
+          OR: [
+            { cnNumber: { contains: query, mode: "insensitive" } },
+            { shopifyOrderName: { contains: query, mode: "insensitive" } },
+            { consigneeName: { contains: query, mode: "insensitive" } },
+          ],
+        }
+      : {}),
+  };
+  return db.shipment.findMany({
+    where,
+    orderBy: { updatedAt: "desc" },
+    take: 5000,
+  });
+}
+
+export async function listEligibleShipmentsForLoadsheet(storeId) {
+  return db.shipment.findMany({
+    where: {
+      storeId,
+      cnNumber: { not: null },
+      status: { notIn: ["CANCELLED", "DELIVERED", "RETURNED"] },
+    },
+    select: { id: true, cnNumber: true, shopifyOrderName: true, status: true },
+    orderBy: { bookedAt: "desc" },
+    take: 1000,
+  });
+}
+
+export async function purgeOldLogs({ apiLogDays = 30, webhookLogDays = 30 } = {}) {
+  const apiCutoff = new Date(Date.now() - apiLogDays * 86_400_000);
+  const webhookCutoff = new Date(Date.now() - webhookLogDays * 86_400_000);
+  const [{ count: apiDeleted }, { count: webhookDeleted }] = await Promise.all([
+    db.apiLog.deleteMany({ where: { createdAt: { lt: apiCutoff } } }),
+    db.webhookLog.deleteMany({ where: { createdAt: { lt: webhookCutoff } } }),
+  ]);
+  return { apiDeleted, webhookDeleted };
+}
+
+export async function getShipmentById(storeId, shipmentId) {
+  return db.shipment.findFirst({
+    where: { id: shipmentId, storeId },
+    include: {
+      logs: { orderBy: { createdAt: "desc" } },
+    },
+  });
+}
+
+function parsePerCnErrors(raw) {
+  // Leopards may return: { status: 0, error: { "CN1": "msg", "CN2": "msg" } }
+  // or sometimes nested under raw.error / raw.data.
+  const errSource = raw?.error ?? raw?.data?.error;
+  if (!errSource || typeof errSource !== "object") return {};
+  const out = {};
+  for (const [key, value] of Object.entries(errSource)) {
+    out[String(key)] = typeof value === "string" ? value : JSON.stringify(value);
+  }
+  return out;
+}
+
+export async function cancelShipments(storeId, cnNumbers) {
+  const shipments = await db.shipment.findMany({
+    where: {
+      storeId,
+      cnNumber: { in: cnNumbers },
+      status: { notIn: TERMINAL_STATUSES },
+    },
+  });
+
+  if (!shipments.length) {
+    return { ok: false, message: "No cancellable shipments were selected." };
+  }
+
+  const settings = await getSettings(storeId, { decrypt: true });
+  const client = new LeopardApiClient({ storeId, settings });
+  const result = await client.cancelBookedPackets(
+    shipments.map((s) => s.cnNumber),
+  );
+
+  // Parse per-CN errors regardless of overall ok/fail status.
+  const cnErrors = parsePerCnErrors(result?.raw);
+
+  if (!result.ok && Object.keys(cnErrors).length === 0) {
+    // Total failure with no per-CN detail â€” mark every requested CN as failed.
+    return {
+      ok: false,
+      message: result.message ?? "Leopards rejected the cancel request.",
+    };
+  }
+
+  const cancellableShipments = shipments.filter((s) => !cnErrors[s.cnNumber]);
+  const failed = shipments
+    .filter((s) => cnErrors[s.cnNumber])
+    .map((s) => ({ cn: s.cnNumber, reason: cnErrors[s.cnNumber] }));
+
+  if (cancellableShipments.length === 0) {
+    return {
+      ok: false,
+      message: "Leopards rejected every cancellation.",
+      failed,
+    };
+  }
+
+  const ids = cancellableShipments.map((s) => s.id);
+  const now = new Date();
+
+  await db.$transaction([
+    db.shipment.updateMany({
+      where: { id: { in: ids } },
+      data: { status: "CANCELLED", cancelledAt: now, lastError: null },
+    }),
+    db.shipmentLog.createMany({
+      data: cancellableShipments.map((s) => ({
+        shipmentId: s.id,
+        eventType: "CANCELLED",
+        fromStatus: s.status,
+        toStatus: "CANCELLED",
+        message: "Cancelled through Leopards",
+      })),
+    }),
+  ]);
+
+  const message =
+    failed.length > 0
+      ? `${cancellableShipments.length} cancelled, ${failed.length} failed.`
+      : `${cancellableShipments.length} shipment(s) cancelled.`;
+
+  return {
+    ok: true,
+    message,
+    cancelled: cancellableShipments.length,
+    failed,
+  };
+}
+
+function extractTrackedPackets(result) {
+  const source =
+    result?.data?.packet_list ??
+    result?.raw?.packet_list ??
+    result?.data ??
+    [];
+  return Array.isArray(source) ? source : [];
+}
+
+export async function refreshShipmentStatuses(storeId, cnNumbers = []) {
+  const settings = await getSettings(storeId, { decrypt: true });
+  const shipments = await db.shipment.findMany({
+    where: {
+      storeId,
+      cnNumber: cnNumbers.length ? { in: cnNumbers } : { not: null },
+      status: { notIn: TERMINAL_STATUSES },
+    },
+  });
+
+  if (!shipments.length) {
+    return { ok: false, message: "No active shipments need status refresh." };
+  }
+
+  const client = new LeopardApiClient({ storeId, settings });
+
+  const CHUNK_SIZE = 50;
+  const allCns = shipments.map((s) => s.cnNumber);
+  const allPackets = [];
+  const chunkErrors = [];
+
+  for (let i = 0; i < allCns.length; i += CHUNK_SIZE) {
+    const chunk = allCns.slice(i, i + CHUNK_SIZE);
+    const result = await client.trackBookedPacket(chunk);
+    if (!result.ok) {
+      chunkErrors.push(result.message ?? "Leopards API error");
+      continue;
+    }
+    allPackets.push(...extractTrackedPackets(result));
+  }
+
+  if (!allPackets.length && chunkErrors.length) {
+    return { ok: false, message: chunkErrors[0] };
+  }
+
+  const byCn = new Map(
+    allPackets.map((packet) => [
+      String(packet.track_number ?? packet.cn_number ?? packet.CN ?? ""),
+      packet,
+    ]),
+  );
+
+  return applyStatusUpdates(storeId, shipments, byCn);
+}
+
+export async function refreshShipmentStatusesByDateRange(storeId, fromDate, toDate) {
+  const settings = await getSettings(storeId, { decrypt: true });
+  const client = new LeopardApiClient({ storeId, settings });
+  const result = await client.getBookedPacketLastStatus(fromDate, toDate);
+
+  if (!result.ok) return result;
+
+  const packets = extractTrackedPackets(result);
+  if (!packets.length) {
+    return { ok: true, message: "No status updates returned for the selected date range." };
+  }
+
+  const cnNumbers = packets
+    .map((p) => String(p.tracking_number ?? p.track_number ?? p.cn_number ?? ""))
+    .filter(Boolean);
+
+  if (!cnNumbers.length) {
+    return { ok: true, message: "No matching CN numbers in the response." };
+  }
+
+  const shipments = await db.shipment.findMany({
+    where: { storeId, cnNumber: { in: cnNumbers } },
+  });
+
+  const byCn = new Map(
+    packets.map((packet) => [
+      String(packet.tracking_number ?? packet.track_number ?? packet.cn_number ?? ""),
+      packet,
+    ]),
+  );
+
+  return applyStatusUpdates(storeId, shipments, byCn);
+}
+
+async function applyStatusUpdates(storeId, shipments, byCn) {
+  const shipmentUpdates = [];
+  const logEntries = [];
+
+  for (const shipment of shipments) {
+    const packet = byCn.get(String(shipment.cnNumber));
+    if (!packet) continue;
+
+    const rawStatus =
+      packet.booked_packet_status ?? packet.status ?? packet.packet_status;
+    const nextStatus = mapLeopardStatus(rawStatus);
+
+    if (!rawStatus) continue;
+    if (nextStatus === shipment.status && shipment.leopardStatusRaw === String(rawStatus)) {
+      continue;
+    }
+
+    shipmentUpdates.push({ shipment, nextStatus, rawStatus: String(rawStatus) });
+
+    if (nextStatus !== shipment.status) {
+      logEntries.push({
+        shipmentId: shipment.id,
+        eventType: "STATUS_CHANGE",
+        fromStatus: shipment.status,
+        toStatus: nextStatus,
+        message: String(rawStatus),
+      });
+    }
+  }
+
+  if (!shipmentUpdates.length) {
+    return { ok: true, message: "All statuses are already up to date." };
+  }
+
+  // Single transaction with per-row updates (necessary since leopardStatusRaw differs per row).
+  // updateMany cannot set different values per row, so individual update() calls are batched into a tx.
+  const txOps = shipmentUpdates.map(({ shipment, nextStatus, rawStatus }) =>
+    db.shipment.update({
+      where: { id: shipment.id },
+      data: {
+        status: nextStatus,
+        leopardStatusRaw: rawStatus,
+        ...(nextStatus === "DELIVERED" && shipment.status !== "DELIVERED"
+          ? { deliveredAt: new Date() }
+          : {}),
+        ...(nextStatus === "CANCELLED" && shipment.status !== "CANCELLED"
+          ? { cancelledAt: new Date() }
+          : {}),
+      },
+    }),
+  );
+
+  if (logEntries.length) {
+    txOps.push(db.shipmentLog.createMany({ data: logEntries }));
+  }
+
+  await db.$transaction(txOps);
+
+  return {
+    ok: true,
+    message: `${shipmentUpdates.length} shipment status(es) updated.`,
+    updated: shipmentUpdates.length,
+  };
+}
+
+===== shopify-orders.server.js =====
+import db from "../db.server";
+
+const ORDER_FIELDS = `#graphql
+  id
+  name
+  displayFinancialStatus
+  paymentGatewayNames
+  note
+  phone
+  email
+  totalPriceSet {
+    shopMoney { amount currencyCode }
+  }
+  customer {
+    displayName
+    email
+    phone
+  }
+  shippingAddress {
+    name
+    phone
+    address1
+    address2
+    city
+    province
+    zip
+    country
+  }
+`;
+
+const ORDERS_QUERY = `#graphql
+  query LeopardOrders($first: Int, $last: Int, $query: String, $after: String, $before: String) {
+    orders(first: $first, last: $last, sortKey: CREATED_AT, reverse: true, query: $query, after: $after, before: $before) {
+      edges {
+        cursor
+        node {
+          ${ORDER_FIELDS}
+        }
+      }
+      pageInfo {
+        hasNextPage
+        hasPreviousPage
+        startCursor
+        endCursor
+      }
+    }
+  }
+`;
+
+const ORDER_BY_ID_QUERY = `#graphql
+  query LeopardOrderById($id: ID!) {
+    order(id: $id) {
+      ${ORDER_FIELDS}
+    }
+  }
+`;
+
+const DEFAULT_COD_KEYWORDS = ["cod", "cash on delivery"];
+
+function isCodOrder(order, codKeywords = DEFAULT_COD_KEYWORDS) {
+  const gatewayText = (order.paymentGatewayNames ?? []).join(" ").toLowerCase();
+  // If no gateway info at all, treat as COD (safer default for Pakistani stores).
+  if (!gatewayText) return true;
+  // If any keyword matches, it's COD.
+  if (codKeywords.some((keyword) => keyword && gatewayText.includes(keyword))) return true;
+  // If paid online (card/bank), it's NOT COD.
+  const onlineKeywords = ["visa", "mastercard", "stripe", "paypal", "bank", "credit", "debit", "online"];
+  if (onlineKeywords.some((k) => gatewayText.includes(k))) return false;
+  // Default to COD for unknown gateways.
+  return true;
+}
+
+export function shapeOrder(order, shipment = null, defaultWeightGrams = 1000, codKeywords = DEFAULT_COD_KEYWORDS) {
+  const shipping = order.shippingAddress ?? {};
+  const total = order.totalPriceSet?.shopMoney;
+  // totalPriceSet.shopMoney.amount is a string like "1500.00" â€” parse and round.
+  const rawAmount = parseFloat(total?.amount ?? "0");
+  const codAmount = isCodOrder(order, codKeywords)
+    ? Math.round(isNaN(rawAmount) ? 0 : rawAmount)
+    : 0;
+
+  const isCancelledShipment = shipment?.status === "CANCELLED";
+
+  return {
+    id: order.id,
+    name: order.name,
+    customerName: shipping.name ?? order.customer?.displayName ?? "Unknown customer",
+    customerEmail: order.customer?.email ?? order.email ?? "",
+    customerPhone: shipping.phone ?? order.customer?.phone ?? order.phone ?? "",
+    destinationCity: shipping.city ?? "",
+    address: [shipping.address1, shipping.address2, shipping.city, shipping.province, shipping.zip]
+      .filter(Boolean)
+      .join(", "),
+    financialStatus: order.displayFinancialStatus,
+    codAmount,
+    currency: total?.currencyCode ?? "PKR",
+    weightGrams: defaultWeightGrams,
+    note: order.note ?? "",
+    bookingStatus: isCancelledShipment ? "PENDING" : shipment?.status ?? "PENDING",
+    cnNumber: isCancelledShipment ? "" : shipment?.cnNumber ?? "",
+    slipLink: isCancelledShipment ? "" : shipment?.slipLink ?? "",
+    lastError: shipment?.lastError ?? "",
+  };
+}
+
+export async function listOrders({
+  admin,
+  storeId,
+  query = "",
+  first = 25,
+  after = null,
+  before = null,
+  defaultWeightGrams = 1000,
+  codKeywords = DEFAULT_COD_KEYWORDS,
+}) {
+  // Shopify cursor pagination: use `last + before` for backward, `first + after` for forward.
+  const variables = { query: query || null };
+  if (before) {
+    variables.last = first;
+    variables.before = before;
+  } else {
+    variables.first = first;
+    variables.after = after || null;
+  }
+
+  const response = await admin.graphql(ORDERS_QUERY, { variables });
+  const json = await response.json();
+
+  if (json.errors) {
+    console.error("[listOrders] GraphQL errors:", JSON.stringify(json.errors));
+  }
+
+  const edges = json.data?.orders?.edges ?? [];
+  const pageInfo = json.data?.orders?.pageInfo ?? {
+    hasNextPage: false,
+    hasPreviousPage: false,
+    startCursor: null,
+    endCursor: null,
+  };
+  const nodes = edges.map((edge) => edge.node);
+  const orderIds = nodes.map((order) => order.id);
+  const shipments = orderIds.length
+    ? await db.shipment.findMany({
+        where: {
+          storeId,
+          shopifyOrderId: { in: orderIds },
+        },
+      })
+    : [];
+  const byOrderId = new Map(shipments.map((shipment) => [shipment.shopifyOrderId, shipment]));
+
+  return {
+    orders: nodes.map((order) =>
+      shapeOrder(order, byOrderId.get(order.id), defaultWeightGrams, codKeywords),
+    ),
+    pageInfo,
+  };
+}
+
+export async function getOrder({
+  admin,
+  storeId,
+  orderId,
+  defaultWeightGrams = 1000,
+  codKeywords = DEFAULT_COD_KEYWORDS,
+}) {
+  const response = await admin.graphql(ORDER_BY_ID_QUERY, {
+    variables: { id: orderId },
+  });
+  const json = await response.json();
+
+  if (json.errors) {
+    console.error("[getOrder] GraphQL errors:", JSON.stringify(json.errors));
+  }
+
+  const order = json.data?.order;
+  if (!order) return null;
+
+  const shipment = await db.shipment.findUnique({
+    where: { storeId_shopifyOrderId: { storeId, shopifyOrderId: order.id } },
+  });
+
+  return shapeOrder(order, shipment, defaultWeightGrams, codKeywords);
+}
+
+===== store.server.js =====
+import db from "../db.server";
+import { encryptSecret } from "../lib/crypto.server";
+
+export async function ensureStore(session) {
+  if (!session?.shop) {
+    throw new Response("Unauthorized", { status: 401 });
+  }
+
+  const encryptedToken = session.accessToken
+    ? encryptSecret(session.accessToken)
+    : "";
+
+  return db.store.upsert({
+    where: { shopDomain: session.shop },
+    create: {
+      shopDomain: session.shop,
+      accessToken: encryptedToken,
+      scopes: session.scope,
+      settings: {
+        create: {
+          defaultWeightGrams: Number(process.env.DEFAULT_PACKET_WEIGHT_GRAMS ?? 1000),
+          leopardEnvironment: process.env.LEOPARDS_DEFAULT_ENVIRONMENT === "production"
+            ? "production"
+            : "staging",
+        },
+      },
+    },
+    update: {
+      accessToken: encryptedToken,
+      scopes: session.scope,
+      isActive: true,
+      uninstalledAt: null,
+    },
+  });
+}
+
+export async function markStoreUninstalled(shop) {
+  const store = await db.store.findUnique({ where: { shopDomain: shop } });
+
+  if (!store) return null;
+
+  await db.settings.updateMany({
+    where: { storeId: store.id },
+    data: {
+      leopardApiKey: null,
+      leopardApiPassword: null,
+    },
+  });
+
+  return db.store.update({
+    where: { id: store.id },
+    data: {
+      isActive: false,
+      uninstalledAt: new Date(),
+    },
+  });
+}
+

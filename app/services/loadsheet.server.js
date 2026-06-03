@@ -4,10 +4,10 @@ import { getSettings } from "./settings.server";
 
 export async function listLoadsheets(storeId) {
   return db.loadsheet.findMany({
-    where: { storeId },
+    where:   { storeId },
     orderBy: { createdAt: "desc" },
     include: { shipments: { include: { shipment: true } } },
-    take: 100,
+    take:    100,
   });
 }
 
@@ -21,11 +21,18 @@ function extractLoadSheetId(result) {
 }
 
 export async function generateLoadsheet(storeId, cnNumbers) {
+  if (!Array.isArray(cnNumbers) || cnNumbers.length === 0) {
+    return { ok: false, message: "Select at least one shipment." };
+  }
+  if (cnNumbers.length > 500) {
+    return { ok: false, message: "Maximum 500 shipments per loadsheet." };
+  }
+
   const shipments = await db.shipment.findMany({
     where: {
       storeId,
       cnNumber: { in: cnNumbers },
-      status: { notIn: ["CANCELLED", "DELIVERED", "RETURNED"] },
+      status:   { notIn: ["CANCELLED", "DELIVERED", "RETURNED"] },
     },
   });
 
@@ -34,67 +41,64 @@ export async function generateLoadsheet(storeId, cnNumbers) {
   }
 
   const settings = await getSettings(storeId, { decrypt: true });
-  const client = new LeopardApiClient({ storeId, settings });
-  const result = await client.generateLoadSheet(
-    shipments.map((shipment) => shipment.cnNumber),
-  );
+  const client   = new LeopardApiClient({ storeId, settings });
+  const result   = await client.generateLoadSheet(shipments.map((s) => s.cnNumber));
 
   if (!result.ok) return result;
 
   const loadSheetId = String(extractLoadSheetId(result) ?? "");
   if (!loadSheetId) {
-    return { ok: false, message: "Leopards did not return a loadsheet id." };
+    return { ok: false, message: "Leopards did not return a loadsheet ID." };
   }
 
-  const loadsheet = await db.loadsheet.create({
-    data: {
-      storeId,
-      loadSheetId,
-      courierName: "Leopards Courier",
-      courierCode: "LCS",
-      cnCount: shipments.length,
-      shipments: {
-        create: shipments.map((shipment) => ({
-          shipmentId: shipment.id,
-        })),
+  // @@unique([storeId, loadSheetId]) prevents duplicate records from double-clicks.
+  // Use upsert to be idempotent — if Leopards returns the same ID twice, we don't duplicate.
+  try {
+    const loadsheet = await db.loadsheet.create({
+      data: {
+        storeId,
+        loadSheetId,
+        courierName: "Leopards Courier",
+        courierCode: "LCS",
+        cnCount:     shipments.length,
+        shipments:   {
+          create: shipments.map((s) => ({ shipmentId: s.id })),
+        },
       },
-    },
-  });
+    });
 
-  await db.shipment.updateMany({
-    where: {
-      id: { in: shipments.map((shipment) => shipment.id) }
-    },
-    data: {
-      lastError: null,
+    return {
+      ok:          true,
+      message:     `Loadsheet ${loadsheet.loadSheetId} generated (${shipments.length} shipments).`,
+      loadSheetId: loadsheet.loadSheetId,
+    };
+  } catch (err) {
+    // P2002 = unique constraint violation — loadsheet with this ID already exists
+    if (err.code === "P2002") {
+      const existing = await db.loadsheet.findFirst({ where: { storeId, loadSheetId } });
+      return {
+        ok:          true,
+        message:     `Loadsheet ${loadSheetId} already exists.`,
+        loadSheetId: existing?.loadSheetId ?? loadSheetId,
+      };
     }
-  });
-
-  return {
-    ok: true,
-    message: `Loadsheet ${loadsheet.loadSheetId} generated.`,
-    loadSheetId: loadsheet.loadSheetId,
-  };
+    throw err;
+  }
 }
 
 export async function downloadLoadsheet(storeId, loadSheetId) {
-  const loadsheet = await db.loadsheet.findFirst({
-    where: { storeId, loadSheetId },
-  });
-
-  if (!loadsheet) {
-    return { ok: false, message: "Loadsheet not found." };
-  }
+  const loadsheet = await db.loadsheet.findFirst({ where: { storeId, loadSheetId } });
+  if (!loadsheet) return { ok: false, message: "Loadsheet not found." };
 
   const settings = await getSettings(storeId, { decrypt: true });
-  const client = new LeopardApiClient({ storeId, settings });
-  const result = await client.downloadLoadSheet(loadSheetId);
+  const client   = new LeopardApiClient({ storeId, settings });
+  const result   = await client.downloadLoadSheet(loadSheetId);
 
   if (!result.ok) return result;
 
   await db.loadsheet.update({
     where: { id: loadsheet.id },
-    data: { status: "downloaded" },
+    data:  { status: "downloaded" },
   });
 
   return result;

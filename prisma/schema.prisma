@@ -127,6 +127,7 @@ model Shipment {
   consigneePhone      String
   consigneeAddress    String
   lastError           String?
+  bookingLockedAt     DateTime?
   bookedAt            DateTime?
   deliveredAt         DateTime?
   cancelledAt         DateTime?
@@ -155,8 +156,8 @@ model Loadsheet {
   updatedAt   DateTime            @updatedAt
   shipments   LoadsheetShipment[]
 
+  @@unique([storeId, loadSheetId])
   @@index([storeId])
-  @@index([storeId, loadSheetId])
 }
 
 model LoadsheetShipment {
@@ -194,6 +195,7 @@ model WebhookLog {
   error            String?
   createdAt        DateTime      @default(now())
 
+  @@index([topic, payloadDigest])
   @@index([createdAt])
 }
 

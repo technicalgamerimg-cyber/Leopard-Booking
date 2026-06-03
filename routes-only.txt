@@ -1,0 +1,3668 @@
+===== F:\Nakson projects\leopard-booking\app\routes\auth.login\error.server.jsx =====
+import { LoginErrorType } from "@shopify/shopify-app-react-router/server";
+
+export function loginErrorMessage(loginErrors) {
+  if (loginErrors?.shop === LoginErrorType.MissingShop) {
+    return { shop: "Please enter your shop domain to log in" };
+  } else if (loginErrors?.shop === LoginErrorType.InvalidShop) {
+    return { shop: "Please enter a valid shop domain to log in" };
+  }
+
+  return {};
+}
+
+===== F:\Nakson projects\leopard-booking\app\routes\auth.login\route.jsx =====
+import { AppProvider } from "@shopify/shopify-app-react-router/react";
+import { useState } from "react";
+import { Form, useActionData, useLoaderData } from "react-router";
+import { login } from "../../shopify.server";
+import { loginErrorMessage } from "./error.server";
+
+export const loader = async ({ request }) => {
+  const errors = loginErrorMessage(await login(request));
+
+  return { errors };
+};
+
+export const action = async ({ request }) => {
+  const errors = loginErrorMessage(await login(request));
+
+  return {
+    errors,
+  };
+};
+
+export default function Auth() {
+  const loaderData = useLoaderData();
+  const actionData = useActionData();
+  const [shop, setShop] = useState("");
+  const { errors } = actionData || loaderData;
+
+  return (
+    <AppProvider embedded={false}>
+      <s-page>
+        <Form method="post">
+          <s-section heading="Log in">
+            <s-text-field
+              name="shop"
+              label="Shop domain"
+              details="example.myshopify.com"
+              value={shop}
+              onChange={(e) => setShop(e.currentTarget.value)}
+              autocomplete="on"
+              error={errors.shop}
+            ></s-text-field>
+            <s-button type="submit">Log in</s-button>
+          </s-section>
+        </Form>
+      </s-page>
+    </AppProvider>
+  );
+}
+
+===== F:\Nakson projects\leopard-booking\app\routes\_index\route.jsx =====
+import { redirect, Form, useLoaderData } from "react-router";
+import { login } from "../../shopify.server";
+import styles from "./styles.module.css";
+
+export const loader = async ({ request }) => {
+  const url = new URL(request.url);
+
+  if (url.searchParams.get("shop")) {
+    throw redirect(`/app?${url.searchParams.toString()}`);
+  }
+
+  return { showForm: Boolean(login) };
+};
+
+export default function App() {
+  const { showForm } = useLoaderData();
+
+  return (
+    <div className={styles.index}>
+      <div className={styles.content}>
+        <h1 className={styles.heading}>Leopards Courier — Shopify Integration</h1>
+        <p className={styles.text}>
+          Book, track, and manage Leopards courier shipments directly from your
+          Shopify Admin.
+        </p>
+        {showForm && (
+          <Form className={styles.form} method="post" action="/auth/login">
+            <label className={styles.label}>
+              <span>Shop domain</span>
+              <input className={styles.input} type="text" name="shop" />
+              <span>e.g: my-shop-domain.myshopify.com</span>
+            </label>
+            <button className={styles.button} type="submit">
+              Install on your store
+            </button>
+          </Form>
+        )}
+        <ul className={styles.list}>
+          <li>
+            <strong>One-click booking</strong>. Send any Shopify order to
+            Leopards Courier with a single click — no copying customer data
+            between systems.
+          </li>
+          <li>
+            <strong>Real-time tracking</strong>. Statuses sync automatically and
+            on-demand, with delivered and cancelled events written back to
+            Shopify fulfillments.
+          </li>
+          <li>
+            <strong>Daily loadsheets</strong>. Generate and download
+            consolidated pickup loadsheets as PDFs whenever your courier
+            arrives.
+          </li>
+        </ul>
+      </div>
+    </div>
+  );
+}
+
+===== F:\Nakson projects\leopard-booking\app\routes\api.sync-statuses.jsx =====
+import db from "../db.server";
+import { refreshShipmentStatusesByDateRange } from "../services/shipment.server";
+
+function unauthorized(message = "Unauthorized") {
+  return new Response(JSON.stringify({ ok: false, message }), {
+    status: 401,
+    headers: { "Content-Type": "application/json" },
+  });
+}
+
+function methodNotAllowed() {
+  return new Response(
+    JSON.stringify({ ok: false, message: "Use POST." }),
+    {
+      status: 405,
+      headers: { "Content-Type": "application/json", Allow: "POST" },
+    },
+  );
+}
+
+function formatDate(date) {
+  return date.toISOString().slice(0, 10);
+}
+
+export const loader = () => methodNotAllowed();
+
+export const action = async ({ request }) => {
+  if (request.method !== "POST") return methodNotAllowed();
+
+  const secret = process.env.SYNC_SECRET;
+  if (!secret) return unauthorized("SYNC_SECRET is not configured.");
+
+  const auth = request.headers.get("Authorization") ?? "";
+  if (!auth.startsWith("Bearer ") || auth.slice(7).trim() !== secret) {
+    return unauthorized();
+  }
+
+  const stores = await db.store.findMany({
+    where: {
+      isActive: true,
+      settings: {
+        AND: [
+          { leopardApiKey: { not: null } },
+          { leopardApiPassword: { not: null } },
+        ],
+      },
+    },
+    select: { id: true, shopDomain: true },
+  });
+
+  const today = new Date();
+  const thirtyDaysAgo = new Date(today.getTime() - 30 * 24 * 60 * 60 * 1000);
+  const fromDate = formatDate(thirtyDaysAgo);
+  const toDate = formatDate(today);
+
+  let totalUpdated = 0;
+  const errors = [];
+
+  for (const store of stores) {
+    try {
+      const result = await refreshShipmentStatusesByDateRange(
+        store.id,
+        fromDate,
+        toDate,
+      );
+      if (result.ok) {
+        totalUpdated += result.updated ?? 0;
+      } else {
+        errors.push({ shop: store.shopDomain, message: result.message });
+      }
+    } catch (err) {
+      errors.push({ shop: store.shopDomain, message: err.message });
+    }
+  }
+
+  return new Response(
+    JSON.stringify({
+      ok: true,
+      stores: stores.length,
+      updated: totalUpdated,
+      errors,
+      fromDate,
+      toDate,
+    }),
+    {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    },
+  );
+};
+
+===== F:\Nakson projects\leopard-booking\app\routes\app.jsx =====
+import { Outlet, useLoaderData, useLocation, useRouteError } from "react-router";
+import { boundary } from "@shopify/shopify-app-react-router/server";
+import { AppProvider } from "@shopify/shopify-app-react-router/react";
+import { authenticate } from "../shopify.server";
+
+export const loader = async ({ request }) => {
+  await authenticate.admin(request);
+
+  // eslint-disable-next-line no-undef
+  return { apiKey: process.env.SHOPIFY_API_KEY || "" };
+};
+
+const NAV_ITEMS = [
+  { href: "/app", label: "Dashboard", match: (p) => p === "/app" },
+  { href: "/app/orders", label: "Orders", match: (p) => p.startsWith("/app/orders") },
+  { href: "/app/shipments", label: "Shipments", match: (p) => p.startsWith("/app/shipments") },
+  { href: "/app/loadsheets", label: "Loadsheets", match: (p) => p.startsWith("/app/loadsheets") },
+  { href: "/app/settings", label: "Settings", match: (p) => p.startsWith("/app/settings") },
+];
+
+export default function App() {
+  const { apiKey } = useLoaderData();
+  const location = useLocation();
+
+  return (
+    <AppProvider embedded apiKey={apiKey}>
+      <s-app-nav>
+        {NAV_ITEMS.map((item) => {
+          const isActive = item.match(location.pathname);
+          return (
+            <s-link
+              key={item.href}
+              href={item.href}
+              aria-current={isActive ? "page" : undefined}
+            >
+              {item.label}
+            </s-link>
+          );
+        })}
+      </s-app-nav>
+      <Outlet />
+    </AppProvider>
+  );
+}
+
+// Shopify needs React Router to catch some thrown responses, so that their headers are included in the response.
+export function ErrorBoundary() {
+  return boundary.error(useRouteError());
+}
+
+export const headers = (headersArgs) => {
+  return boundary.headers(headersArgs);
+};
+
+===== F:\Nakson projects\leopard-booking\app\routes\app.loadsheets.download.jsx =====
+import { authenticate } from "../shopify.server";
+import { ensureStore } from "../services/store.server";
+import { downloadLoadsheet } from "../services/loadsheet.server";
+
+export const loader = async ({ request }) => {
+  const { session } = await authenticate.admin(request);
+  const store = await ensureStore(session);
+  const url = new URL(request.url);
+  const loadSheetId = url.searchParams.get("loadSheetId");
+
+  if (!loadSheetId) {
+    return new Response("Missing loadSheetId", { status: 400 });
+  }
+
+  const result = await downloadLoadsheet(store.id, loadSheetId);
+
+  if (!result.ok) {
+    return new Response(result.message ?? "Failed to download loadsheet.", {
+      status: 502,
+    });
+  }
+
+  return new Response(result.data, {
+    status: 200,
+    headers: {
+      "Content-Type": "application/pdf",
+      "Content-Disposition": `inline; filename="loadsheet-${loadSheetId}.pdf"`,
+      "Cache-Control": "private, no-store",
+    },
+  });
+};
+
+===== F:\Nakson projects\leopard-booking\app\routes\app.loadsheets.jsx =====
+import { useEffect, useMemo, useState } from "react";
+import { useFetcher, useLoaderData, useRouteError } from "react-router";
+import { useAppBridge } from "@shopify/app-bridge-react";
+import { boundary } from "@shopify/shopify-app-react-router/server";
+import { authenticate } from "../shopify.server";
+import { ensureStore } from "../services/store.server";
+import {
+  generateLoadsheet,
+  listLoadsheets,
+} from "../services/loadsheet.server";
+import { listEligibleShipmentsForLoadsheet } from "../services/shipment.server";
+
+export const loader = async ({ request }) => {
+  const { session } = await authenticate.admin(request);
+  const store = await ensureStore(session);
+  const [loadsheets, eligible] = await Promise.all([
+    listLoadsheets(store.id),
+    listEligibleShipmentsForLoadsheet(store.id),
+  ]);
+
+  return {
+    loadsheets: loadsheets.map((loadsheet) => ({
+      id: loadsheet.id,
+      loadSheetId: loadsheet.loadSheetId,
+      status: loadsheet.status,
+      cnCount: loadsheet.cnCount,
+      createdAt: loadsheet.createdAt.toISOString(),
+      shipments: loadsheet.shipments.map((entry) => ({
+        cnNumber: entry.shipment?.cnNumber ?? "",
+        orderName: entry.shipment?.shopifyOrderName ?? "",
+      })),
+    })),
+    eligibleShipments: eligible.map((shipment) => ({
+      id: shipment.id,
+      cnNumber: shipment.cnNumber,
+      orderName: shipment.shopifyOrderName,
+      status: shipment.status,
+    })),
+  };
+};
+
+export const action = async ({ request }) => {
+  const { session } = await authenticate.admin(request);
+  const store = await ensureStore(session);
+  const formData = await request.formData();
+
+  const cnNumbers = String(formData.get("cnNumbers") ?? "")
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean);
+
+  const res = await generateLoadsheet(store.id, cnNumbers);
+  return { success: res.ok, error: res.ok ? null : res.message, data: res };
+};
+
+export default function Loadsheets() {
+  const { loadsheets, eligibleShipments } = useLoaderData();
+  const fetcher = useFetcher();
+  const shopify = useAppBridge();
+  const busy = fetcher.state !== "idle";
+
+  const [selectedCns, setSelectedCns] = useState(
+    () => new Set(eligibleShipments.map((s) => s.cnNumber)),
+  );
+  const [expandedLoadsheet, setExpandedLoadsheet] = useState(null);
+  const [downloadingId, setDownloadingId] = useState(null);
+
+  useEffect(() => {
+    setSelectedCns(new Set(eligibleShipments.map((s) => s.cnNumber)));
+  }, [eligibleShipments]);
+
+  useEffect(() => {
+    if (fetcher.data?.error) {
+      shopify.toast.show(fetcher.data.error, { isError: true });
+    } else if (fetcher.data?.success && fetcher.data.data?.message) {
+      shopify.toast.show(fetcher.data.data.message);
+    }
+  }, [fetcher.data, shopify]);
+
+  function toggleCn(cn) {
+    setSelectedCns((prev) => {
+      const next = new Set(prev);
+      if (next.has(cn)) next.delete(cn);
+      else next.add(cn);
+      return next;
+    });
+  }
+
+  function selectAll() {
+    setSelectedCns(new Set(eligibleShipments.map((s) => s.cnNumber)));
+  }
+
+  function deselectAll() {
+    setSelectedCns(new Set());
+  }
+
+  async function handleDownload(loadSheetId, rowId) {
+    setDownloadingId(rowId);
+    try {
+      const url = `/app/loadsheets/download?loadSheetId=${encodeURIComponent(loadSheetId)}`;
+      const response = await fetch(url);
+      if (!response.ok) throw new Error(`Server returned ${response.status}`);
+      const contentType = response.headers.get("content-type") ?? "";
+      if (!contentType.includes("application/pdf")) {
+        const text = await response.text();
+        throw new Error(text || "Unexpected response from server");
+      }
+      const blob = await response.blob();
+      const objectUrl = URL.createObjectURL(blob);
+      const win = window.open(objectUrl, "_blank");
+      if (win) {
+        setTimeout(() => URL.revokeObjectURL(objectUrl), 30_000);
+      } else {
+        const a = document.createElement("a");
+        a.href = objectUrl;
+        a.download = `loadsheet-${loadSheetId}.pdf`;
+        a.click();
+        setTimeout(() => URL.revokeObjectURL(objectUrl), 5_000);
+      }
+    } catch (err) {
+      console.error("[loadsheet download]", err);
+      shopify.toast.show("Could not download load sheet. Please try again.", { isError: true });
+    } finally {
+      setDownloadingId(null);
+    }
+  }
+
+  const allSelected =
+    eligibleShipments.length > 0 &&
+    selectedCns.size === eligibleShipments.length;
+
+  const selectedCnList = useMemo(
+    () => Array.from(selectedCns).join(","),
+    [selectedCns],
+  );
+
+  return (
+    <s-page heading="Loadsheets">
+
+      {/* ── Generate section ── */}
+      <s-section heading="Generate loadsheet">
+        {eligibleShipments.length === 0 ? (
+          <div style={{ background: "#f6f6f7", border: "1px solid #e1e3e5", borderRadius: 8, padding: "40px 20px", textAlign: "center" }}>
+            <div style={{ fontSize: 36, marginBottom: 10 }}>📋</div>
+            <div style={{ fontWeight: 700, fontSize: 15, color: "#202223", marginBottom: 4 }}>No eligible shipments</div>
+            <div style={{ fontSize: 13, color: "#6d7175" }}>
+              Loadsheets can only include booked, active shipments (not Cancelled, Delivered, or Returned).
+              Book some orders first, then return here.
+            </div>
+            <a href="/app/orders" style={{ display: "inline-block", marginTop: 14, padding: "7px 16px", background: "#5c6ac4", color: "#fff", borderRadius: 6, fontSize: 13, fontWeight: 600, textDecoration: "none" }}>
+              Go to Orders →
+            </a>
+          </div>
+        ) : (
+          <fetcher.Form method="post">
+            <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+
+              {/* Select all / count row */}
+              <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+                <s-button onClick={allSelected ? deselectAll : selectAll} disabled={busy}>
+                  {allSelected ? "Deselect all" : "Select all"}
+                </s-button>
+                <span style={{ fontSize: 13, color: "#6d7175" }}>
+                  {selectedCns.size} of {eligibleShipments.length} shipment{eligibleShipments.length !== 1 ? "s" : ""} selected
+                </span>
+              </div>
+
+              {/* Shipment checkboxes */}
+              <div style={{ background: "#fff", border: "1px solid #e1e3e5", borderRadius: 8, overflow: "hidden" }}>
+                {eligibleShipments.map((shipment, i) => (
+                  <div
+                    key={shipment.id}
+                    style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 16px", borderBottom: i < eligibleShipments.length - 1 ? "1px solid #f1f2f4" : "none" }}
+                  >
+                    <s-checkbox
+                      checked={selectedCns.has(shipment.cnNumber)}
+                      onChange={() => toggleCn(shipment.cnNumber)}
+                      disabled={busy}
+                    />
+                    <span style={{ fontWeight: 600, fontSize: 13, color: "#202223", fontFamily: "monospace" }}>{shipment.cnNumber}</span>
+                    <span style={{ fontSize: 13, color: "#6d7175" }}>{shipment.orderName}</span>
+                    <span style={{ marginLeft: "auto", fontSize: 11, padding: "2px 7px", borderRadius: 10, background: "#eaf4fb", color: "#084e8a", fontWeight: 600 }}>
+                      {shipment.status}
+                    </span>
+                  </div>
+                ))}
+              </div>
+
+              <input type="hidden" name="cnNumbers" value={selectedCnList} />
+              <div>
+                <s-button
+                  type="submit"
+                  variant="primary"
+                  disabled={busy || selectedCns.size === 0}
+                  loading={busy}
+                >
+                  {busy
+                    ? "Generating load sheet…"
+                    : `Generate load sheet for ${selectedCns.size} shipment${selectedCns.size !== 1 ? "s" : ""}`}
+                </s-button>
+              </div>
+            </div>
+          </fetcher.Form>
+        )}
+      </s-section>
+
+      {/* ── History section ── */}
+      <s-section heading="History">
+        {loadsheets.length === 0 ? (
+          <div style={{ background: "#f6f6f7", border: "1px solid #e1e3e5", borderRadius: 8, padding: "32px 20px", textAlign: "center" }}>
+            <div style={{ fontWeight: 600, fontSize: 14, color: "#202223", marginBottom: 4 }}>No load sheets yet</div>
+            <div style={{ fontSize: 13, color: "#6d7175" }}>
+              Select booked shipments above and click Generate to create your first load sheet.
+            </div>
+          </div>
+        ) : (
+          <div style={{ background: "#fff", border: "1px solid #e1e3e5", borderRadius: 8, overflow: "hidden" }}>
+            {loadsheets.map((loadsheet, i) => {
+              const isExpanded = expandedLoadsheet === loadsheet.id;
+              const isDownloading = downloadingId === loadsheet.id;
+              return (
+                <div key={loadsheet.id} style={{ borderBottom: i < loadsheets.length - 1 ? "1px solid #f1f2f4" : "none" }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 12, padding: "12px 16px", flexWrap: "wrap" }}>
+                    {/* ID + meta */}
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontWeight: 600, fontSize: 13, color: "#202223", fontFamily: "monospace" }}>{loadsheet.loadSheetId}</div>
+                      <div style={{ fontSize: 12, color: "#6d7175", marginTop: 2 }}>
+                        {loadsheet.cnCount} shipment{loadsheet.cnCount !== 1 ? "s" : ""} · {new Date(loadsheet.createdAt).toLocaleString()}
+                      </div>
+                    </div>
+
+                    {/* Status badge */}
+                    <span style={{ padding: "2px 8px", borderRadius: 12, fontSize: 11, fontWeight: 600, background: loadsheet.status === "downloaded" ? "#e3f1df" : "#eaf4fb", color: loadsheet.status === "downloaded" ? "#1e542a" : "#084e8a", whiteSpace: "nowrap" }}>
+                      {loadsheet.status === "downloaded" ? "Downloaded" : "Generated"}
+                    </span>
+
+                    {/* Download button */}
+                    <s-button
+                      onClick={() => handleDownload(loadsheet.loadSheetId, loadsheet.id)}
+                      disabled={isDownloading}
+                      loading={isDownloading}
+                    >
+                      {isDownloading ? "Downloading…" : "Download PDF"}
+                    </s-button>
+
+                    {/* Expand toggle */}
+                    <button
+                      onClick={() => setExpandedLoadsheet(isExpanded ? null : loadsheet.id)}
+                      style={{ background: "none", border: "1px solid #c9cccf", borderRadius: 6, padding: "5px 10px", cursor: "pointer", fontSize: 12, color: "#444750", whiteSpace: "nowrap" }}
+                    >
+                      {isExpanded ? "▲ Hide" : "▼ Contents"}
+                    </button>
+                  </div>
+
+                  {/* Expanded contents */}
+                  {isExpanded && (
+                    <div style={{ padding: "0 16px 12px", display: "flex", flexDirection: "column", gap: 4 }}>
+                      {loadsheet.shipments.map((s, idx) => (
+                        <div key={`${s.cnNumber}-${idx}`} style={{ display: "flex", gap: 10, fontSize: 13, color: "#444750" }}>
+                          <span style={{ fontFamily: "monospace", color: "#202223", fontWeight: 600 }}>{s.cnNumber}</span>
+                          <span style={{ color: "#6d7175" }}>{s.orderName}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </s-section>
+
+    </s-page>
+  );
+}
+
+export function ErrorBoundary() {
+  return boundary.error(useRouteError());
+}
+
+===== F:\Nakson projects\leopard-booking\app\routes\app.orders.jsx =====
+import { useEffect, useState } from "react";
+import { Form, useFetcher, useLoaderData, useNavigation, useRouteError } from "react-router";
+import { useAppBridge } from "@shopify/app-bridge-react";
+import { boundary } from "@shopify/shopify-app-react-router/server";
+import { authenticate } from "../shopify.server";
+import { ensureStore } from "../services/store.server";
+import { getSettings, getCodKeywords } from "../services/settings.server";
+import { listOrders } from "../services/shopify-orders.server";
+import { bookOrder, bookOrdersBatch } from "../services/booking.server";
+
+const STATUS_STYLES = {
+  PENDING:    { dot: "#e8912d", bg: "#fff5ea", text: "#8a4b00", label: "Not booked" },
+  BOOKED:     { dot: "#2c6ecb", bg: "#eaf4fb", text: "#0d3880", label: "Booked" },
+  IN_TRANSIT: { dot: "#5c6ac4", bg: "#f0f0ff", text: "#3d3d8f", label: "In transit" },
+  DELIVERED:  { dot: "#3d8b40", bg: "#e3f1df", text: "#1e542a", label: "Delivered" },
+  RETURNED:   { dot: "#e8912d", bg: "#fff5ea", text: "#8a4b00", label: "Returned" },
+  CANCELLED:  { dot: "#8c9196", bg: "#f6f6f7", text: "#444750", label: "Cancelled" },
+  EXCEPTION:  { dot: "#d72c0d", bg: "#fce8e7", text: "#7f0007", label: "Exception" },
+};
+
+const FIELD_LABELS = {
+  booked_packet_weight:         "Weight",
+  booked_packet_no_piece:       "Pieces",
+  booked_packet_collect_amount: "COD amount",
+  origin_city:                  "Origin city",
+  destination_city:             "Destination city",
+  shipment_id:                  "Shipment type",
+  shipment_name_eng:            "Shipper name",
+  shipment_phone:               "Shipper phone",
+  shipment_address:             "Shipper address",
+  consignment_name_eng:         "Consignee name",
+  consignment_phone:            "Consignee phone",
+  consignment_address:          "Consignee address",
+  special_instructions:         "Special instructions",
+};
+
+const FINANCIAL_STATUS_STYLES = {
+  PAID:                { bg: "#e3f1df", text: "#1e542a" },
+  PARTIALLY_PAID:      { bg: "#eaf4fb", text: "#084e8a" },
+  PENDING:             { bg: "#fff5ea", text: "#8a4b00" },
+  REFUNDED:            { bg: "#f6f6f7", text: "#444750" },
+  PARTIALLY_REFUNDED:  { bg: "#f6f6f7", text: "#444750" },
+  VOIDED:              { bg: "#f6f6f7", text: "#444750" },
+};
+
+const FINANCIAL_STATUS_LABELS = {
+  PAID:               "Paid",
+  PARTIALLY_PAID:     "Partial",
+  PENDING:            "Pending",
+  REFUNDED:           "Refunded",
+  PARTIALLY_REFUNDED: "Part. refunded",
+  VOIDED:             "Voided",
+};
+
+function StatusPill({ status }) {
+  const s = STATUS_STYLES[status] || { dot: "#8c9196", bg: "#f6f6f7", text: "#444750", label: status };
+  return (
+    <span style={{ display: "inline-flex", alignItems: "center", gap: 5, padding: "3px 9px", borderRadius: 12, background: s.bg, color: s.text, fontSize: 12, fontWeight: 600, whiteSpace: "nowrap" }}>
+      <span style={{ width: 6, height: 6, borderRadius: "50%", background: s.dot, flexShrink: 0 }} />
+      {s.label}
+    </span>
+  );
+}
+
+function FinancialBadge({ status }) {
+  const key = status?.toUpperCase?.() ?? "";
+  const style = FINANCIAL_STATUS_STYLES[key] ?? { bg: "#f6f6f7", text: "#444750" };
+  const label = FINANCIAL_STATUS_LABELS[key] ?? (status ?? "—");
+  return (
+    <span style={{ display: "inline-block", padding: "2px 7px", borderRadius: 10, fontSize: 11, fontWeight: 600, background: style.bg, color: style.text, whiteSpace: "nowrap" }}>
+      {label}
+    </span>
+  );
+}
+
+export const loader = async ({ request }) => {
+  const { admin, session } = await authenticate.admin(request);
+  const store = await ensureStore(session);
+  const settings = await getSettings(store.id);
+  const url = new URL(request.url);
+  const query = url.searchParams.get("query") ?? "";
+  const after = url.searchParams.get("after") ?? null;
+  const before = url.searchParams.get("before") ?? null;
+  const codKeywords = getCodKeywords(settings);
+
+  const { orders, pageInfo } = await listOrders({
+    admin,
+    storeId: store.id,
+    query,
+    first: 50,
+    after,
+    before,
+    defaultWeightGrams: settings.defaultWeightGrams,
+    codKeywords,
+  });
+
+  return {
+    orders,
+    query,
+    pageInfo,
+    hasCredentials: settings.hasCredentials,
+    hasOriginCity: Boolean(settings.originCityId),
+    defaultWeightGrams: settings.defaultWeightGrams,
+    defaultSpecialInstructions: settings.defaultSpecialInstructions ?? "",
+  };
+};
+
+export const action = async ({ request }) => {
+  const { admin, session } = await authenticate.admin(request);
+  const store = await ensureStore(session);
+  const formData = await request.formData();
+  const intent = formData.get("intent");
+
+  if (intent === "bookBatch") {
+    let orderIds = [];
+    try { orderIds = JSON.parse(String(formData.get("orderIds") ?? "[]")); } catch { orderIds = []; }
+    return bookOrdersBatch({ admin, storeId: store.id, orderIds });
+  }
+
+  return bookOrder({
+    admin,
+    storeId: store.id,
+    orderId: formData.get("orderId"),
+    overrides: {
+      weightGrams:         formData.get("overrideWeight"),
+      noOfPieces:          formData.get("overridePieces"),
+      codAmount:           formData.get("overrideCod"),
+      specialInstructions: formData.get("overrideInstructions"),
+    },
+  });
+};
+
+function canBookOrder(order, hasCredentials) {
+  if (!hasCredentials) return false;
+  if (order.cnNumber) return false;
+  if (order.bookingStatus === "CANCELLED") return true;
+  return order.bookingStatus === "PENDING";
+}
+
+function buildPageQuery({ query, after, before }) {
+  const p = new URLSearchParams();
+  if (query) p.set("query", query);
+  if (after) p.set("after", after);
+  if (before) p.set("before", before);
+  return p.toString();
+}
+
+function BookingPanel({ order, fetcher, defaultWeightGrams, defaultSpecialInstructions, hasCredentials, onClose }) {
+  const [weight, setWeight] = useState(String(defaultWeightGrams));
+  const [pieces, setPieces] = useState("1");
+  const [cod, setCod] = useState(String(order.codAmount ?? 0));
+  const [instructions, setInstructions] = useState(order.note || defaultSpecialInstructions || "Handle with care");
+
+  const busy = fetcher.state !== "idle" && fetcher.formData?.get("orderId") === order.id;
+
+  function handleSubmit() {
+    fetcher.submit(
+      { orderId: order.id, overrideWeight: weight, overridePieces: pieces, overrideCod: cod, overrideInstructions: instructions },
+      { method: "post", action: "/app/orders" },
+    );
+  }
+
+  return (
+    <div style={{ background: "#f9fafb", border: "1px solid #c9cccf", borderRadius: 8, padding: 20 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 16 }}>
+        <div>
+          <div style={{ fontWeight: 700, fontSize: 15, color: "#202223" }}>
+            Custom booking — {order.name}
+          </div>
+          <div style={{ fontSize: 13, color: "#6d7175", marginTop: 3 }}>
+            {order.customerName}
+            {order.destinationCity ? ` · ${order.destinationCity}` : ""}
+            {order.codAmount > 0 ? ` · COD ${order.codAmount} ${order.currency}` : " · Prepaid"}
+          </div>
+        </div>
+        <button
+          onClick={onClose}
+          style={{ background: "none", border: "none", cursor: "pointer", fontSize: 22, color: "#6d7175", padding: "0 4px", lineHeight: 1 }}
+          aria-label="Close"
+        >
+          ×
+        </button>
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 12, marginBottom: 12 }}>
+        <s-text-field
+          label="Weight (grams)"
+          value={weight}
+          onChange={(e) => setWeight(e.target?.value ?? e.currentTarget?.value ?? weight)}
+        />
+        <s-text-field
+          label="Pieces"
+          value={pieces}
+          onChange={(e) => setPieces(e.target?.value ?? e.currentTarget?.value ?? pieces)}
+        />
+        <s-text-field
+          label="COD amount (PKR)"
+          value={cod}
+          onChange={(e) => setCod(e.target?.value ?? e.currentTarget?.value ?? cod)}
+          helpText="Set 0 for prepaid orders"
+        />
+      </div>
+      <div style={{ marginBottom: 16 }}>
+        <s-text-field
+          label="Special instructions"
+          value={instructions}
+          onChange={(e) => setInstructions(e.target?.value ?? e.currentTarget?.value ?? instructions)}
+        />
+      </div>
+
+      <div style={{ display: "flex", gap: 8 }}>
+        <s-button
+          variant="primary"
+          disabled={busy || !hasCredentials}
+          loading={busy}
+          onClick={handleSubmit}
+        >
+          Confirm booking
+        </s-button>
+        <s-button onClick={onClose} disabled={busy}>Cancel</s-button>
+      </div>
+    </div>
+  );
+}
+
+export default function Orders() {
+  const {
+    orders,
+    query,
+    pageInfo,
+    hasCredentials,
+    hasOriginCity,
+    defaultWeightGrams,
+    defaultSpecialInstructions,
+  } = useLoaderData();
+
+  const fetcher = useFetcher();
+  const navigation = useNavigation();
+  const shopify = useAppBridge();
+
+  const [selectedIds, setSelectedIds] = useState(() => new Set());
+  const [bookingPanelOrder, setBookingPanelOrder] = useState(null);
+  const [fieldErrors, setFieldErrors] = useState(null);
+
+  const loading = navigation.state === "loading";
+  const submittingOrderId = fetcher.state !== "idle" ? fetcher.formData?.get("orderId") : null;
+  const isBatchSubmitting = fetcher.state !== "idle" && fetcher.formData?.get("intent") === "bookBatch";
+
+  useEffect(() => {
+    if (!fetcher.data) return;
+    if (fetcher.data.message) {
+      shopify.toast.show(fetcher.data.message, { isError: !fetcher.data.ok });
+    }
+    if (fetcher.data.fieldErrors) {
+      setFieldErrors(fetcher.data.fieldErrors);
+    } else {
+      setFieldErrors(null);
+    }
+    if (fetcher.data.ok) {
+      setBookingPanelOrder(null);
+      if (fetcher.formData?.get("intent") === "bookBatch") setSelectedIds(new Set());
+    }
+  }, [fetcher.data, fetcher.formData, shopify]);
+
+  function toggleSelection(orderId) {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      next.has(orderId) ? next.delete(orderId) : next.add(orderId);
+      return next;
+    });
+  }
+
+  const bookableOrders = orders.filter((o) => canBookOrder(o, hasCredentials));
+  const allVisibleSelected = bookableOrders.length > 0 && bookableOrders.every((o) => selectedIds.has(o.id));
+  const batchResults = fetcher.data?.results ?? null;
+
+  return (
+    <s-page heading="Orders">
+
+      {/* ── Setup warnings ── */}
+      {!hasCredentials && (
+        <s-section>
+          <div style={{ background: "#fff8ec", border: "1px solid #e8912d", borderRadius: 8, padding: "14px 18px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
+            <div>
+              <div style={{ fontWeight: 700, fontSize: 14, color: "#5c3500" }}>Setup required before booking</div>
+              <div style={{ fontSize: 13, color: "#8a4b00", marginTop: 2 }}>
+                Add your Leopards API credentials, test the connection, refresh cities, and set your origin city.
+              </div>
+            </div>
+            <a href="/app/settings" style={{ padding: "7px 14px", background: "#e8912d", color: "#fff", borderRadius: 6, fontSize: 13, fontWeight: 600, textDecoration: "none", whiteSpace: "nowrap" }}>
+              Open Settings →
+            </a>
+          </div>
+        </s-section>
+      )}
+
+      {hasCredentials && !hasOriginCity && (
+        <s-section>
+          <div style={{ background: "#fff8ec", border: "1px solid #e8912d", borderRadius: 8, padding: "12px 16px", fontSize: 13, color: "#8a4b00" }}>
+            ⚠️ Origin city not set. <a href="/app/settings" style={{ color: "#5c6ac4", fontWeight: 600 }}>Open Settings →</a>
+          </div>
+        </s-section>
+      )}
+
+      {/* ── Field validation errors ── */}
+      {fieldErrors && (
+        <s-section>
+          <div style={{ background: "#fce8e7", border: "1px solid #d72c0d", borderRadius: 8, padding: "14px 18px" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 8 }}>
+              <div>
+                <div style={{ fontWeight: 700, fontSize: 14, color: "#7f0007", marginBottom: 8 }}>
+                  Fix these issues before booking:
+                </div>
+                <ul style={{ margin: 0, paddingInlineStart: "1.25rem", display: "flex", flexDirection: "column", gap: 4 }}>
+                  {Object.entries(fieldErrors).map(([field, message]) => (
+                    <li key={field} style={{ fontSize: 13, color: "#7f0007" }}>
+                      <strong>{FIELD_LABELS[field] ?? field}:</strong> {String(message)}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+              <button onClick={() => setFieldErrors(null)} style={{ background: "none", border: "none", cursor: "pointer", fontSize: 18, color: "#7f0007", padding: "0 4px", flexShrink: 0 }}>×</button>
+            </div>
+          </div>
+        </s-section>
+      )}
+
+      {/* ── Batch results ── */}
+      {batchResults && (
+        <s-section>
+          <div style={{ background: fetcher.data?.ok ? "#e3f1df" : "#fce8e7", border: `1px solid ${fetcher.data?.ok ? "#3d8b40" : "#d72c0d"}`, borderRadius: 8, padding: "14px 18px" }}>
+            <div style={{ fontWeight: 700, fontSize: 14, color: fetcher.data?.ok ? "#1e542a" : "#7f0007", marginBottom: 8 }}>
+              {fetcher.data?.message}
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+              {batchResults.map((r) => (
+                <div key={r.orderId} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13 }}>
+                  <span style={{ fontSize: 14 }}>{r.ok ? "✅" : "❌"}</span>
+                  <span style={{ fontWeight: 600, color: "#202223" }}>{r.orderName}:</span>
+                  <span style={{ color: "#6d7175" }}>{r.message}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        </s-section>
+      )}
+
+      {/* ── Search bar — uses plain Form (GET) separate from the POST fetcher ── */}
+      <s-section>
+        <Form method="get">
+          <div style={{ display: "flex", gap: 10, alignItems: "flex-end", flexWrap: "wrap" }}>
+            <div style={{ flex: "1 1 260px" }}>
+              <s-text-field
+                label="Search orders"
+                name="query"
+                defaultValue={query}
+                placeholder="Order number, customer name…"
+              />
+            </div>
+            <s-button type="submit">Search</s-button>
+            {query && <s-button href="/app/orders">Clear</s-button>}
+          </div>
+        </Form>
+      </s-section>
+
+      {/* ── Batch action bar ── */}
+      {selectedIds.size > 0 && (
+        <s-section>
+          <div style={{ background: "#f0f0ff", border: "1px solid #5c6ac4", borderRadius: 8, padding: "12px 16px", display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+            <div style={{ fontWeight: 600, fontSize: 14, color: "#3d3d8f" }}>
+              {selectedIds.size} order{selectedIds.size !== 1 ? "s" : ""} selected
+            </div>
+            <s-button
+              variant="primary"
+              disabled={isBatchSubmitting || !hasCredentials}
+              loading={isBatchSubmitting}
+              onClick={() =>
+                fetcher.submit(
+                  { intent: "bookBatch", orderIds: JSON.stringify(Array.from(selectedIds)) },
+                  { method: "post", action: "/app/orders" },
+                )
+              }
+            >
+              Book {selectedIds.size} order{selectedIds.size !== 1 ? "s" : ""}
+            </s-button>
+            <s-button onClick={() => setSelectedIds(new Set())} disabled={isBatchSubmitting}>
+              Clear selection
+            </s-button>
+          </div>
+        </s-section>
+      )}
+
+      {/* ── Orders table ── */}
+      <s-section>
+        {loading ? (
+          <div style={{ padding: "40px 20px", textAlign: "center" }}>
+            <div style={{ fontSize: 13, color: "#6d7175" }}>Loading orders…</div>
+          </div>
+        ) : orders.length === 0 ? (
+          <div style={{ background: "#f6f6f7", border: "1px solid #e1e3e5", borderRadius: 8, padding: "48px 20px", textAlign: "center" }}>
+            <div style={{ fontSize: 36, marginBottom: 10 }}>🛒</div>
+            <div style={{ fontWeight: 700, fontSize: 15, color: "#202223", marginBottom: 4 }}>
+              {query ? `No orders matching "${query}"` : "No orders found"}
+            </div>
+            <div style={{ fontSize: 13, color: "#6d7175" }}>
+              {query ? "Try a different search term or clear the filter." : "Orders from your Shopify store will appear here."}
+            </div>
+            {query && (
+              <a href="/app/orders" style={{ display: "inline-block", marginTop: 12, padding: "7px 16px", background: "#5c6ac4", color: "#fff", borderRadius: 6, fontSize: 13, fontWeight: 600, textDecoration: "none" }}>
+                Clear search
+              </a>
+            )}
+          </div>
+        ) : (
+          <s-table>
+            <s-table-header-row>
+              <s-table-header>
+                <s-checkbox
+                  checked={allVisibleSelected}
+                  onChange={() =>
+                    allVisibleSelected
+                      ? setSelectedIds(new Set())
+                      : setSelectedIds(new Set(bookableOrders.map((o) => o.id)))
+                  }
+                  disabled={bookableOrders.length === 0}
+                />
+              </s-table-header>
+              <s-table-header>Order</s-table-header>
+              <s-table-header>Customer</s-table-header>
+              <s-table-header>City</s-table-header>
+              <s-table-header>Payment</s-table-header>
+              <s-table-header>COD</s-table-header>
+              <s-table-header>Status</s-table-header>
+              <s-table-header>Action</s-table-header>
+            </s-table-header-row>
+            <s-table-body>
+              {orders.map((order) => {
+                const isSubmitting = submittingOrderId === order.id;
+                const isBookable = canBookOrder(order, hasCredentials);
+                const isBooked = Boolean(order.cnNumber);
+
+                return (
+                  <s-table-row key={order.id}>
+                    <s-table-cell>
+                      <s-checkbox
+                        checked={selectedIds.has(order.id)}
+                        disabled={!isBookable}
+                        onChange={() => toggleSelection(order.id)}
+                      />
+                    </s-table-cell>
+                    <s-table-cell>
+                      <span style={{ fontWeight: 600, fontSize: 13, color: "#202223" }}>{order.name}</span>
+                    </s-table-cell>
+                    <s-table-cell>
+                      <div style={{ fontSize: 13, color: "#202223" }}>{order.customerName}</div>
+                      {order.customerPhone && (
+                        <div style={{ fontSize: 11, color: "#8c9196", marginTop: 1 }}>{order.customerPhone}</div>
+                      )}
+                    </s-table-cell>
+                    <s-table-cell>
+                      <span style={{ fontSize: 13, color: "#444750" }}>{order.destinationCity || "—"}</span>
+                    </s-table-cell>
+                    <s-table-cell>
+                      <FinancialBadge status={order.financialStatus} />
+                    </s-table-cell>
+                    <s-table-cell>
+                      {order.codAmount > 0 ? (
+                        <span style={{ fontSize: 13, fontWeight: 600, color: "#202223" }}>
+                          {order.codAmount.toLocaleString()} <span style={{ fontWeight: 400, color: "#6d7175" }}>{order.currency}</span>
+                        </span>
+                      ) : (
+                        <span style={{ fontSize: 12, color: "#8c9196" }}>Prepaid</span>
+                      )}
+                    </s-table-cell>
+                    <s-table-cell>
+                      <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                        <StatusPill status={order.bookingStatus} />
+                        {order.lastError && (
+                          <div style={{ fontSize: 11, color: "#d72c0d", maxWidth: 180, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={order.lastError}>
+                            {order.lastError}
+                          </div>
+                        )}
+                      </div>
+                    </s-table-cell>
+                    <s-table-cell>
+                      {isBooked ? (
+                        <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+                          {order.slipLink ? (
+                            <s-link href={order.slipLink} target="_blank">
+                              {order.cnNumber}
+                            </s-link>
+                          ) : (
+                            <span style={{ fontSize: 12, fontFamily: "monospace", color: "#444750" }}>{order.cnNumber}</span>
+                          )}
+                          <span style={{ fontSize: 11, color: "#8c9196" }}>CN number</span>
+                        </div>
+                      ) : (
+                        <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                          <s-button
+                            variant="primary"
+                            disabled={isSubmitting || !hasCredentials}
+                            loading={isSubmitting}
+                            onClick={() =>
+                              fetcher.submit(
+                                { orderId: order.id },
+                                { method: "post", action: "/app/orders" },
+                              )
+                            }
+                          >
+                            Book
+                          </s-button>
+                          {isBookable && (
+                            <button
+                              onClick={() => setBookingPanelOrder(bookingPanelOrder?.id === order.id ? null : order)}
+                              style={{ background: "none", border: "1px solid #c9cccf", borderRadius: 5, padding: "5px 8px", cursor: "pointer", fontSize: 12, color: "#444750", whiteSpace: "nowrap" }}
+                            >
+                              Options
+                            </button>
+                          )}
+                        </div>
+                      )}
+                    </s-table-cell>
+                  </s-table-row>
+                );
+              })}
+            </s-table-body>
+          </s-table>
+        )}
+      </s-section>
+
+      {/* ── Booking panel ── */}
+      {bookingPanelOrder && (
+        <s-section heading={`Custom booking options — ${bookingPanelOrder.name}`}>
+          <BookingPanel
+            order={bookingPanelOrder}
+            fetcher={fetcher}
+            defaultWeightGrams={defaultWeightGrams}
+            defaultSpecialInstructions={defaultSpecialInstructions}
+            hasCredentials={hasCredentials}
+            onClose={() => setBookingPanelOrder(null)}
+          />
+        </s-section>
+      )}
+
+      {/* ── Pagination ── */}
+      {orders.length > 0 && (pageInfo.hasNextPage || pageInfo.hasPreviousPage) && (
+        <s-section>
+          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+            <s-button
+              href={pageInfo.hasPreviousPage ? `/app/orders?${buildPageQuery({ query, before: pageInfo.startCursor })}` : undefined}
+              disabled={!pageInfo.hasPreviousPage}
+            >
+              ← Previous
+            </s-button>
+            <s-button
+              href={pageInfo.hasNextPage ? `/app/orders?${buildPageQuery({ query, after: pageInfo.endCursor })}` : undefined}
+              disabled={!pageInfo.hasNextPage}
+            >
+              Next →
+            </s-button>
+          </div>
+        </s-section>
+      )}
+
+    </s-page>
+  );
+}
+
+export function ErrorBoundary() {
+  return boundary.error(useRouteError());
+}
+
+===== F:\Nakson projects\leopard-booking\app\routes\app.settings.jsx =====
+import { useEffect, useState } from "react";
+import { useFetcher, useLoaderData, useRouteError } from "react-router";
+import { useAppBridge } from "@shopify/app-bridge-react";
+import { boundary } from "@shopify/shopify-app-react-router/server";
+import { authenticate } from "../shopify.server";
+import { ensureStore } from "../services/store.server";
+import {
+  clearCredentials,
+  getSettings,
+  saveSettings,
+  testConnection,
+} from "../services/settings.server";
+import {
+  getCityCacheStats,
+  listOriginCities,
+  refreshCities,
+} from "../services/city.server";
+
+export const loader = async ({ request }) => {
+  const { session } = await authenticate.admin(request);
+  const store = await ensureStore(session);
+  const [settings, originCities, cityStats] = await Promise.all([
+    getSettings(store.id),
+    listOriginCities(store.id),
+    getCityCacheStats(store.id),
+  ]);
+
+  return {
+    settings: {
+      ...settings,
+      createdAt: settings.createdAt.toISOString(),
+      updatedAt: settings.updatedAt.toISOString(),
+    },
+    originCities: originCities.map((c) => ({ id: c.leopardCityId, name: c.name })),
+    cityStats,
+  };
+};
+
+export const action = async ({ request }) => {
+  const { session } = await authenticate.admin(request);
+  const store = await ensureStore(session);
+  const formData = await request.formData();
+  const intent = formData.get("intent");
+
+  if (intent === "test")          return testConnection(store.id);
+  if (intent === "clear")         return clearCredentials(store.id);
+  if (intent === "refreshCities") return refreshCities(store.id);
+  return saveSettings(store.id, formData);
+};
+
+function Toggle({ checked, onChange, label, description }) {
+  return (
+    <div style={{ display: "flex", alignItems: "flex-start", gap: 12 }}>
+      <div
+        onClick={() => onChange(!checked)}
+        style={{
+          width: 44,
+          height: 24,
+          borderRadius: 12,
+          background: checked ? "#5c6ac4" : "#c4cdd5",
+          cursor: "pointer",
+          flexShrink: 0,
+          position: "relative",
+          transition: "background 0.2s",
+          marginTop: 2,
+        }}
+      >
+        <div style={{
+          position: "absolute",
+          top: 2,
+          left: checked ? 22 : 2,
+          width: 20,
+          height: 20,
+          borderRadius: "50%",
+          background: "#fff",
+          boxShadow: "0 1px 3px rgba(0,0,0,0.2)",
+          transition: "left 0.2s",
+        }} />
+      </div>
+      <div>
+        <div style={{ fontSize: 14, fontWeight: 600, color: "#202223", lineHeight: 1.3 }}>{label}</div>
+        {description && <div style={{ fontSize: 12, color: "#6d7175", marginTop: 3 }}>{description}</div>}
+      </div>
+    </div>
+  );
+}
+
+function SettingsCard({ title, subtitle, children, danger }) {
+  return (
+    <div style={{
+      background: "#fff",
+      border: `1px solid ${danger ? "#d72c0d" : "#e1e3e5"}`,
+      borderRadius: 8,
+      overflow: "hidden",
+      marginBottom: 16,
+    }}>
+      <div style={{ padding: "16px 20px", borderBottom: `1px solid ${danger ? "#fce8e7" : "#f1f2f4"}`, background: danger ? "#fce8e7" : "#f9fafb" }}>
+        <div style={{ fontWeight: 700, fontSize: 14, color: danger ? "#7f0007" : "#202223" }}>{title}</div>
+        {subtitle && <div style={{ fontSize: 12, color: danger ? "#b40007" : "#6d7175", marginTop: 2 }}>{subtitle}</div>}
+      </div>
+      <div style={{ padding: "20px" }}>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+function StatusDot({ ok, label }) {
+  return (
+    <div style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "4px 10px", borderRadius: 12, background: ok ? "#e3f1df" : "#f6f6f7", fontSize: 12, fontWeight: 600, color: ok ? "#1e542a" : "#6d7175" }}>
+      <span style={{ width: 7, height: 7, borderRadius: "50%", background: ok ? "#3d8b40" : "#c4cdd5" }} />
+      {label}
+    </div>
+  );
+}
+
+export default function Settings() {
+  const { settings, originCities, cityStats } = useLoaderData();
+  const credFetcher     = useFetcher();
+  const testFetcher     = useFetcher();
+  const defaultsFetcher = useFetcher();
+  const cityFetcher     = useFetcher();
+  const shopify = useAppBridge();
+
+  const [clearConfirm, setClearConfirm] = useState(false);
+  const [writeback, setWriteback]       = useState(Boolean(settings.fulfillmentWritebackEnabled));
+  const [savedSection, setSavedSection] = useState(null);
+
+  const credBusy     = credFetcher.state !== "idle";
+  const testBusy     = testFetcher.state !== "idle";
+  const defaultsBusy = defaultsFetcher.state !== "idle";
+  const cityBusy     = cityFetcher.state !== "idle";
+
+  useEffect(() => { setWriteback(Boolean(settings.fulfillmentWritebackEnabled)); }, [settings.fulfillmentWritebackEnabled]);
+
+  useEffect(() => {
+    if (credFetcher.data?.message) shopify.toast.show(credFetcher.data.message, { isError: !credFetcher.data.ok });
+    if (credFetcher.data?.ok) { setSavedSection("cred"); setTimeout(() => setSavedSection(null), 3000); }
+  }, [credFetcher.data, shopify]);
+
+  useEffect(() => {
+    if (testFetcher.data?.message) shopify.toast.show(testFetcher.data.message, { isError: !testFetcher.data.ok });
+  }, [testFetcher.data, shopify]);
+
+  useEffect(() => {
+    if (defaultsFetcher.data?.message) shopify.toast.show(defaultsFetcher.data.message, { isError: !defaultsFetcher.data.ok });
+    if (defaultsFetcher.data?.ok) { setSavedSection("defaults"); setTimeout(() => setSavedSection(null), 3000); }
+  }, [defaultsFetcher.data, shopify]);
+
+  useEffect(() => {
+    if (cityFetcher.data?.message) shopify.toast.show(cityFetcher.data.message, { isError: !cityFetcher.data.ok });
+  }, [cityFetcher.data, shopify]);
+
+  const step1Done = settings.hasCredentials;
+  const step2Done = cityStats.count > 0;
+  const step3Done = Boolean(settings.originCityId) && Boolean(settings.shipperName);
+  const allStepsDone = step1Done && step2Done && step3Done;
+
+  return (
+    <s-page heading="Settings">
+
+      {/* ── Setup progress ── */}
+      {!allStepsDone && (
+        <s-section heading="Setup checklist">
+          <div style={{ background: "#fff", border: "1px solid #e1e3e5", borderRadius: 8, padding: "16px 20px" }}>
+            {[
+              { done: step1Done, label: "Save your Leopards API credentials", anchor: "#credentials" },
+              { done: step2Done, label: "Refresh the city list (required for city matching)", anchor: "#cities" },
+              { done: step3Done, label: "Set your origin city and shipper details", anchor: "#defaults" },
+            ].map((step, i) => (
+              <div key={i} style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 0", borderBottom: i < 2 ? "1px solid #f1f2f4" : "none" }}>
+                <span style={{ fontSize: 16, flexShrink: 0 }}>{step.done ? "✅" : "⬜"}</span>
+                <span style={{ fontSize: 14, color: step.done ? "#8c9196" : "#202223", textDecoration: step.done ? "line-through" : "none", flex: 1 }}>
+                  {step.label}
+                </span>
+                {!step.done && (
+                  <a href={step.anchor} style={{ fontSize: 12, color: "#5c6ac4", fontWeight: 600, textDecoration: "none" }}>Fix →</a>
+                )}
+              </div>
+            ))}
+          </div>
+        </s-section>
+      )}
+
+      {/* ── Credentials ── */}
+      <s-section heading="Leopards API credentials" id="credentials">
+        <SettingsCard
+          title="API connection"
+          subtitle="Your Leopards Courier merchant API key and password. These are encrypted before storage."
+        >
+          <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 16 }}>
+            <StatusDot ok={settings.hasCredentials} label={settings.hasCredentials ? "Credentials saved" : "Not configured"} />
+            {settings.leopardEnvironment && (
+              <span style={{ fontSize: 12, padding: "3px 8px", borderRadius: 10, background: settings.leopardEnvironment === "production" ? "#e3f1df" : "#eaf4fb", color: settings.leopardEnvironment === "production" ? "#1e542a" : "#084e8a", fontWeight: 600 }}>
+                {settings.leopardEnvironment === "production" ? "Production" : "Staging"}
+              </span>
+            )}
+          </div>
+
+          {/* Save credentials form */}
+          <credFetcher.Form method="post">
+            <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+              <s-select
+                label="Environment"
+                name="environment"
+                defaultValue={settings.leopardEnvironment}
+                helpText="Use Staging to test without real bookings. Switch to Production when ready to go live."
+              >
+                <s-option value="staging">Staging (for testing)</s-option>
+                <s-option value="production">Production (live bookings)</s-option>
+              </s-select>
+
+              <s-text-field
+                label="API key"
+                name="apiKey"
+                placeholder={settings.leopardApiKeyMasked || "Enter your Leopards API key"}
+                autoComplete="off"
+                helpText="Found in your Leopards merchant dashboard under API settings."
+              />
+              <s-text-field
+                label="API password"
+                name="apiPassword"
+                type="password"
+                placeholder={settings.leopardApiPasswordMasked || "Enter your API password"}
+                autoComplete="new-password"
+              />
+
+              <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                <s-button type="submit" variant="primary" disabled={credBusy} loading={credBusy}>
+                  Save credentials
+                </s-button>
+                {savedSection === "cred" && (
+                  <span style={{ fontSize: 13, color: "#3d8b40", fontWeight: 600 }}>✓ Saved</span>
+                )}
+              </div>
+            </div>
+          </credFetcher.Form>
+
+          {/* Test connection — separate fetcher so it doesn't share state with save */}
+          <div style={{ marginTop: 12, paddingTop: 12, borderTop: "1px solid #f1f2f4" }}>
+            <testFetcher.Form method="post" style={{ display: "contents" }}>
+              <input type="hidden" name="intent" value="test" />
+              <s-button
+                type="submit"
+                disabled={testBusy || !settings.hasCredentials}
+                loading={testBusy}
+              >
+                Test connection
+              </s-button>
+            </testFetcher.Form>
+            {!settings.hasCredentials && (
+              <div style={{ fontSize: 12, color: "#8c9196", marginTop: 6 }}>Save credentials above before testing.</div>
+            )}
+          </div>
+        </SettingsCard>
+      </s-section>
+
+      {/* ── City cache ── */}
+      <s-section heading="City list" id="cities">
+        <SettingsCard
+          title="Leopards city master data"
+          subtitle="The city list is used to match your customers' cities to Leopards destination codes. Refresh periodically or after onboarding."
+        >
+          <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 14, flexWrap: "wrap" }}>
+            <StatusDot ok={cityStats.count > 0} label={cityStats.count > 0 ? `${cityStats.count} cities cached` : "No cities cached"} />
+            {cityStats.lastRefreshedAt && (
+              <span style={{ fontSize: 12, color: "#6d7175" }}>
+                Last refreshed {new Date(cityStats.lastRefreshedAt).toLocaleString()}
+              </span>
+            )}
+          </div>
+          {cityStats.count === 0 && (
+            <div style={{ background: "#fff8ec", border: "1px solid #e8912d", borderRadius: 6, padding: "10px 14px", fontSize: 13, color: "#8a4b00", marginBottom: 14 }}>
+              ⚠️ Refresh the city list before booking — destination city matching requires this data.
+            </div>
+          )}
+          <cityFetcher.Form method="post" style={{ display: "contents" }}>
+            <input type="hidden" name="intent" value="refreshCities" />
+            <s-button type="submit" disabled={cityBusy || !settings.hasCredentials} loading={cityBusy}>
+              {cityStats.count > 0 ? "Refresh city list" : "Load cities"}
+            </s-button>
+          </cityFetcher.Form>
+          {!settings.hasCredentials && (
+            <div style={{ fontSize: 12, color: "#8c9196", marginTop: 8 }}>Save credentials above before refreshing cities.</div>
+          )}
+        </SettingsCard>
+      </s-section>
+
+      {/* ── Shipment defaults ── */}
+      <s-section heading="Booking defaults" id="defaults">
+        <SettingsCard
+          title="Shipper & booking defaults"
+          subtitle="These values pre-fill every booking. Merchants can override weight, COD, and instructions per order."
+        >
+          <defaultsFetcher.Form method="post">
+            <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+
+              {originCities.length > 0 ? (
+                <s-select
+                  label="Origin city"
+                  name="originCityId"
+                  defaultValue={settings.originCityId ? String(settings.originCityId) : ""}
+                  helpText="The city your packages are dispatched from."
+                >
+                  <s-option value="">— Select origin city —</s-option>
+                  {originCities.map((city) => (
+                    <s-option key={city.id} value={String(city.id)}>{city.name}</s-option>
+                  ))}
+                </s-select>
+              ) : (
+                <s-text-field
+                  label="Origin city ID"
+                  name="originCityId"
+                  defaultValue={settings.originCityId || ""}
+                  helpText="Refresh the city list above to pick from a dropdown instead."
+                />
+              )}
+
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 12 }}>
+                <s-text-field label="Shipper name" name="shipperName" defaultValue={settings.shipperName || ""} helpText="Your business name as it appears on the waybill." />
+                <s-text-field label="Shipper phone" name="shipperPhone" defaultValue={settings.shipperPhone || ""} />
+                <s-text-field label="Shipper email" name="shipperEmail" defaultValue={settings.shipperEmail || ""} />
+              </div>
+              <s-text-field label="Shipper address" name="shipperAddress" defaultValue={settings.shipperAddress || ""} helpText="Your dispatch warehouse or office address." />
+
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 12 }}>
+                <s-text-field
+                  label="Default packet weight (grams)"
+                  name="defaultWeightGrams"
+                  defaultValue={settings.defaultWeightGrams}
+                  helpText="Used when weight is not specified per order."
+                />
+                <s-text-field
+                  label="Leopards service ID"
+                  name="defaultShipmentId"
+                  defaultValue={settings.defaultShipmentId || 1}
+                  helpText="Your assigned Leopards shipment/service type. Most COD accounts use 1."
+                />
+              </div>
+              <s-text-field
+                label="Default special instructions"
+                name="defaultSpecialInstructions"
+                defaultValue={settings.defaultSpecialInstructions || "Handle with care"}
+                helpText="Printed on every waybill. Can be overridden per order."
+              />
+              <s-text-field
+                label="COD gateway keywords"
+                name="codGatewayKeywords"
+                defaultValue={settings.codGatewayKeywords}
+                helpText="Comma-separated Shopify payment gateway names treated as COD. E.g. 'cod, cash on delivery'."
+              />
+
+              <div style={{ paddingTop: 4 }}>
+                <Toggle
+                  checked={writeback}
+                  onChange={setWriteback}
+                  label="Auto-fulfill orders on booking"
+                  description="When enabled, a fulfillment with the tracking number is automatically created in Shopify when you book a shipment. Highly recommended."
+                />
+                <input type="hidden" name="fulfillmentWritebackEnabled" value={writeback ? "on" : "off"} />
+              </div>
+
+              <div style={{ display: "flex", gap: 8, alignItems: "center", paddingTop: 4 }}>
+                <s-button type="submit" variant="primary" disabled={defaultsBusy} loading={defaultsBusy}>
+                  Save defaults
+                </s-button>
+                {savedSection === "defaults" && (
+                  <span style={{ fontSize: 13, color: "#3d8b40", fontWeight: 600 }}>✓ Saved</span>
+                )}
+              </div>
+            </div>
+          </defaultsFetcher.Form>
+        </SettingsCard>
+      </s-section>
+
+      {/* ── Danger zone ── */}
+      <s-section heading="Danger zone">
+        <SettingsCard
+          title="Clear API credentials"
+          subtitle="Permanently removes your stored Leopards API key and password. All booking operations will stop immediately until new credentials are saved."
+          danger
+        >
+          {!clearConfirm ? (
+            <s-button
+              tone="critical"
+              disabled={credBusy || !settings.hasCredentials}
+              onClick={() => setClearConfirm(true)}
+            >
+              Clear credentials
+            </s-button>
+          ) : (
+            <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+              <div style={{ fontSize: 13, color: "#7f0007", fontWeight: 600 }}>
+                Are you sure? This action cannot be undone. You will need to re-enter your API credentials to book shipments.
+              </div>
+              <div style={{ display: "flex", gap: 8 }}>
+                <credFetcher.Form method="post" style={{ display: "contents" }}>
+                  <input type="hidden" name="intent" value="clear" />
+                  <s-button
+                    type="submit"
+                    tone="critical"
+                    disabled={credBusy}
+                    loading={credBusy && credFetcher.formData?.get("intent") === "clear"}
+                    onClick={() => setTimeout(() => setClearConfirm(false), 0)}
+                  >
+                    Yes, clear credentials
+                  </s-button>
+                </credFetcher.Form>
+                <s-button onClick={() => setClearConfirm(false)} disabled={credBusy}>Cancel</s-button>
+              </div>
+            </div>
+          )}
+          {!settings.hasCredentials && (
+            <div style={{ marginTop: 8, fontSize: 12, color: "#8c9196" }}>No credentials are currently stored.</div>
+          )}
+        </SettingsCard>
+      </s-section>
+
+    </s-page>
+  );
+}
+
+export function ErrorBoundary() {
+  return boundary.error(useRouteError());
+}
+
+===== F:\Nakson projects\leopard-booking\app\routes\app.shipments.$id.jsx =====
+import { useEffect, useState } from "react";
+import {
+  useFetcher,
+  useLoaderData,
+  useNavigate,
+  useRouteError,
+} from "react-router";
+import { useAppBridge } from "@shopify/app-bridge-react";
+import { boundary } from "@shopify/shopify-app-react-router/server";
+import { authenticate } from "../shopify.server";
+import { ensureStore } from "../services/store.server";
+import {
+  cancelShipments,
+  getShipmentById,
+  refreshShipmentStatuses,
+} from "../services/shipment.server";
+import { resolveCityName } from "../services/city.server";
+import { getSettings } from "../services/settings.server";
+import { LeopardApiClient } from "../integrations/leopards/client.server";
+
+const TERMINAL_STATUSES = ["DELIVERED", "CANCELLED", "RETURNED"];
+
+const STATUS_STYLES = {
+  PENDING:    { dot: "#e8912d", bg: "#fff5ea", text: "#8a4b00",  label: "Not booked" },
+  BOOKED:     { dot: "#2c6ecb", bg: "#eaf4fb", text: "#0d3880",  label: "Booked" },
+  IN_TRANSIT: { dot: "#5c6ac4", bg: "#f0f0ff", text: "#3d3d8f",  label: "In transit" },
+  DELIVERED:  { dot: "#3d8b40", bg: "#e3f1df", text: "#1e542a",  label: "Delivered" },
+  RETURNED:   { dot: "#e8912d", bg: "#fff5ea", text: "#8a4b00",  label: "Returned" },
+  CANCELLED:  { dot: "#8c9196", bg: "#f6f6f7", text: "#444750",  label: "Cancelled" },
+  EXCEPTION:  { dot: "#d72c0d", bg: "#fce8e7", text: "#7f0007",  label: "Exception" },
+};
+
+const EVENT_LABELS = {
+  BOOKED:        "Booked",
+  CANCELLED:     "Cancelled",
+  STATUS_CHANGE: "Status updated",
+  ERROR:         "Error",
+};
+
+export const loader = async ({ request, params }) => {
+  const { session } = await authenticate.admin(request);
+  const store = await ensureStore(session);
+  const shipment = await getShipmentById(store.id, params.id);
+
+  if (!shipment) throw new Response("Shipment not found", { status: 404 });
+
+  const [originCityName, destinationCityName] = await Promise.all([
+    shipment.originCityId ? resolveCityName(store.id, shipment.originCityId) : null,
+    shipment.destinationCityId ? resolveCityName(store.id, shipment.destinationCityId) : null,
+  ]);
+
+  let trackingEvents = [];
+  if (shipment.cnNumber) {
+    try {
+      const settings = await getSettings(store.id, { decrypt: true });
+      if (settings.leopardApiKey && settings.leopardApiPassword) {
+        const client = new LeopardApiClient({ storeId: store.id, settings });
+        const trackResult = await client.trackBookedPacket([shipment.cnNumber]);
+        if (trackResult.ok) {
+          const packets = trackResult.data?.packet_list ?? trackResult.raw?.packet_list ?? [];
+          const packet = Array.isArray(packets)
+            ? packets.find((p) => String(p.track_number ?? p.cn_number ?? "") === String(shipment.cnNumber))
+            : null;
+          const detail = packet?.["Tracking Detail"] ?? packet?.tracking_detail ?? packet?.trackingDetail ?? [];
+          if (Array.isArray(detail)) {
+            trackingEvents = detail.map((event, idx) => ({
+              id: `${idx}`,
+              status:       event.Status ?? event.status ?? "",
+              activityDate: event.Activity_datetime ?? event.activity_datetime ?? event.Activity_Date ?? event.activity_date ?? event["Activity Date"] ?? "",
+              reason:       event.Reason ?? event.reason ?? "",
+              receiverName: event.Reciever_Name ?? event.Receiver_Name ?? event["Reciever Name"] ?? event["Receiver Name"] ?? event.receiver_name ?? "",
+            }));
+          }
+        }
+      }
+    } catch (err) {
+      console.error("[shipment detail] tracking fetch failed:", err);
+    }
+  }
+
+  return {
+    shipment: {
+      ...shipment,
+      bookedAt:    shipment.bookedAt?.toISOString() ?? null,
+      deliveredAt: shipment.deliveredAt?.toISOString() ?? null,
+      cancelledAt: shipment.cancelledAt?.toISOString() ?? null,
+      createdAt:   shipment.createdAt.toISOString(),
+      updatedAt:   shipment.updatedAt.toISOString(),
+      originCityName,
+      destinationCityName,
+      logs: shipment.logs.map((log) => ({ ...log, createdAt: log.createdAt.toISOString() })),
+    },
+    trackingEvents,
+  };
+};
+
+export const action = async ({ request, params }) => {
+  const { session } = await authenticate.admin(request);
+  const store = await ensureStore(session);
+  const shipment = await getShipmentById(store.id, params.id);
+
+  if (!shipment) return { ok: false, message: "Shipment not found." };
+
+  const formData = await request.formData();
+  const intent = formData.get("intent");
+  const cn = shipment.cnNumber;
+
+  if (!cn) return { ok: false, message: "Shipment has no CN number." };
+  if (intent === "refresh") return refreshShipmentStatuses(store.id, [cn]);
+  if (intent === "cancel")  return cancelShipments(store.id, [cn]);
+
+  return { ok: false, message: "Unknown action." };
+};
+
+// ── Helper components ─────────────────────────────────────────────────────────
+
+function StatusPill({ status }) {
+  const s = STATUS_STYLES[status] || { dot: "#8c9196", bg: "#f6f6f7", text: "#444750", label: status };
+  return (
+    <span style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "4px 10px", borderRadius: 14, background: s.bg, color: s.text, fontSize: 13, fontWeight: 700 }}>
+      <span style={{ width: 8, height: 8, borderRadius: "50%", background: s.dot, flexShrink: 0 }} />
+      {s.label}
+    </span>
+  );
+}
+
+function DetailGrid({ children }) {
+  return <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "10px 24px" }}>{children}</div>;
+}
+
+function DetailRow({ label, value, mono }) {
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+      <span style={{ fontSize: 11, color: "#8c9196", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.06em" }}>{label}</span>
+      <span style={{ fontSize: 14, color: mono ? "#444750" : "#202223", fontFamily: mono ? "monospace" : undefined, fontWeight: mono ? 600 : 400 }}>
+        {value ?? "—"}
+      </span>
+    </div>
+  );
+}
+
+function EventLogBadge({ type }) {
+  const styles = {
+    BOOKED:        { bg: "#e3f1df", text: "#1e542a" },
+    CANCELLED:     { bg: "#fce8e7", text: "#7f0007" },
+    STATUS_CHANGE: { bg: "#f0f0ff", text: "#3d3d8f" },
+    ERROR:         { bg: "#fce8e7", text: "#7f0007" },
+  };
+  const s = styles[type] || { bg: "#f6f6f7", text: "#444750" };
+  return (
+    <span style={{ fontSize: 11, padding: "2px 7px", borderRadius: 10, background: s.bg, color: s.text, fontWeight: 600 }}>
+      {EVENT_LABELS[type] ?? type}
+    </span>
+  );
+}
+
+// ── Page ─────────────────────────────────────────────────────────────────────
+
+export default function ShipmentDetail() {
+  const { shipment, trackingEvents } = useLoaderData();
+  const fetcher = useFetcher();
+  const navigate = useNavigate();
+  const shopify = useAppBridge();
+  const [confirmCancel, setConfirmCancel] = useState(false);
+  const busy = fetcher.state !== "idle";
+
+  useEffect(() => {
+    if (fetcher.data?.message) {
+      shopify.toast.show(fetcher.data.message, { isError: !fetcher.data.ok });
+    }
+    if (fetcher.data?.ok && fetcher.formData?.get("intent") === "cancel") {
+      navigate("/app/shipments");
+    }
+  }, [fetcher.data, fetcher.formData, shopify, navigate]);
+
+  const isTerminal = TERMINAL_STATUSES.includes(shipment.status);
+
+  return (
+    <s-page heading={shipment.shopifyOrderName}>
+
+      {/* ── Action bar ── */}
+      <s-section>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+          <StatusPill status={shipment.status} />
+          {shipment.leopardStatusRaw && (
+            <span style={{ fontSize: 12, color: "#6d7175" }}>Leopards: {shipment.leopardStatusRaw}</span>
+          )}
+          <div style={{ flex: 1 }} />
+          <s-button href="/app/shipments">← All shipments</s-button>
+          {shipment.cnNumber && (
+            <fetcher.Form method="post" style={{ display: "contents" }}>
+              <input type="hidden" name="intent" value="refresh" />
+              <s-button type="submit" disabled={busy} loading={busy && fetcher.formData?.get("intent") === "refresh"}>
+                Refresh status
+              </s-button>
+            </fetcher.Form>
+          )}
+          {shipment.slipLink && (
+            <s-button href={shipment.slipLink} target="_blank">Print slip</s-button>
+          )}
+          {shipment.cnNumber && !isTerminal && (
+            <s-button tone="critical" disabled={busy} onClick={() => setConfirmCancel(true)}>
+              Cancel shipment
+            </s-button>
+          )}
+        </div>
+      </s-section>
+
+      {/* ── Error banner ── */}
+      {shipment.lastError && (
+        <s-section>
+          <div style={{ background: "#fce8e7", border: "1px solid #d72c0d", borderRadius: 8, padding: "12px 16px", fontSize: 13, color: "#7f0007" }}>
+            <strong>Last error:</strong> {shipment.lastError}
+          </div>
+        </s-section>
+      )}
+
+      {/* ── Cancel confirmation ── */}
+      {confirmCancel && (
+        <s-section>
+          <div style={{ background: "#fce8e7", border: "1px solid #d72c0d", borderRadius: 8, padding: "16px 20px" }}>
+            <div style={{ fontWeight: 700, fontSize: 14, color: "#7f0007", marginBottom: 6 }}>
+              Cancel shipment <span style={{ fontFamily: "monospace" }}>{shipment.cnNumber}</span>?
+            </div>
+            <div style={{ fontSize: 13, color: "#b40007", marginBottom: 12 }}>
+              This will cancel it with Leopards Courier and cannot be undone.
+            </div>
+            <div style={{ display: "flex", gap: 8 }}>
+              <fetcher.Form method="post" style={{ display: "contents" }}>
+                <input type="hidden" name="intent" value="cancel" />
+                <s-button type="submit" tone="critical" disabled={busy} loading={busy && fetcher.formData?.get("intent") === "cancel"} onClick={() => setTimeout(() => setConfirmCancel(false), 0)}>
+                  Yes, cancel
+                </s-button>
+              </fetcher.Form>
+              <s-button onClick={() => setConfirmCancel(false)} disabled={busy}>Go back</s-button>
+            </div>
+          </div>
+        </s-section>
+      )}
+
+      {/* ── Two-column layout: details + tracking ── */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(300px, 1fr))", gap: 0 }}>
+
+        {/* Shipment details card */}
+        <s-section heading="Shipment details">
+          <div style={{ background: "#fff", border: "1px solid #e1e3e5", borderRadius: 8, padding: "20px" }}>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "16px 24px" }}>
+              <DetailRow label="Order" value={shipment.shopifyOrderName} />
+              <DetailRow label="CN Number" value={shipment.cnNumber} mono />
+              <DetailRow label="Consignee" value={shipment.consigneeName} />
+              <DetailRow label="Phone" value={shipment.consigneePhone} />
+              <DetailRow label="COD" value={shipment.codAmount > 0 ? `${shipment.codAmount.toLocaleString()} PKR` : "Prepaid"} />
+              <DetailRow label="Weight" value={`${shipment.weightGrams} g`} />
+              <DetailRow label="Pieces" value={shipment.noOfPieces} />
+              <DetailRow label="Origin" value={shipment.originCityName ?? shipment.originCityId ?? "—"} />
+              <DetailRow label="Destination" value={shipment.destinationCityName ?? shipment.destinationCityId ?? "—"} />
+              {shipment.bookedAt && <DetailRow label="Booked" value={new Date(shipment.bookedAt).toLocaleString()} />}
+              {shipment.deliveredAt && <DetailRow label="Delivered" value={new Date(shipment.deliveredAt).toLocaleString()} />}
+              {shipment.cancelledAt && <DetailRow label="Cancelled" value={new Date(shipment.cancelledAt).toLocaleString()} />}
+            </div>
+            {shipment.consigneeAddress && (
+              <div style={{ marginTop: 16, paddingTop: 16, borderTop: "1px solid #f1f2f4" }}>
+                <div style={{ fontSize: 11, color: "#8c9196", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 4 }}>Address</div>
+                <div style={{ fontSize: 14, color: "#444750" }}>{shipment.consigneeAddress}</div>
+              </div>
+            )}
+          </div>
+        </s-section>
+
+        {/* Tracking timeline */}
+        <s-section heading="Tracking timeline">
+          {trackingEvents.length === 0 ? (
+            <div style={{ background: "#f6f6f7", border: "1px solid #e1e3e5", borderRadius: 8, padding: "32px 20px", textAlign: "center" }}>
+              <div style={{ fontSize: 28, marginBottom: 8 }}>📍</div>
+              <div style={{ fontWeight: 600, fontSize: 14, color: "#202223", marginBottom: 4 }}>No tracking events yet</div>
+              <div style={{ fontSize: 13, color: "#6d7175" }}>
+                {shipment.cnNumber ? "Tracking events will appear here once the shipment is picked up." : "This shipment has no CN number yet."}
+              </div>
+              {shipment.cnNumber && (
+                <fetcher.Form method="post" style={{ marginTop: 12 }}>
+                  <input type="hidden" name="intent" value="refresh" />
+                  <s-button type="submit" disabled={busy} loading={busy}>Refresh tracking</s-button>
+                </fetcher.Form>
+              )}
+            </div>
+          ) : (
+            <div style={{ background: "#fff", border: "1px solid #e1e3e5", borderRadius: 8, padding: "0 20px", position: "relative" }}>
+              {trackingEvents.map((event, i) => {
+                const isFirst = i === 0;
+                const isLast  = i === trackingEvents.length - 1;
+                return (
+                  <div key={event.id} style={{ display: "flex", gap: 14, padding: "16px 0", borderBottom: !isLast ? "1px solid #f1f2f4" : "none", position: "relative" }}>
+                    {/* Timeline dot */}
+                    <div style={{ display: "flex", flexDirection: "column", alignItems: "center", flexShrink: 0, width: 16 }}>
+                      <div style={{
+                        width: 12, height: 12, borderRadius: "50%", flexShrink: 0,
+                        background: isFirst ? "#3d8b40" : "#c4cdd5",
+                        border: isFirst ? "2px solid #3d8b40" : "2px solid #c4cdd5",
+                        boxShadow: isFirst ? "0 0 0 3px #e3f1df" : "none",
+                        marginTop: 3,
+                      }} />
+                    </div>
+                    {/* Content */}
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontWeight: isFirst ? 700 : 600, fontSize: 13, color: isFirst ? "#1e542a" : "#202223" }}>
+                        {event.status}
+                      </div>
+                      {event.activityDate && (
+                        <div style={{ fontSize: 12, color: "#8c9196", marginTop: 2 }}>{event.activityDate}</div>
+                      )}
+                      {event.reason && (
+                        <div style={{ fontSize: 12, color: "#6d7175", marginTop: 2 }}>{event.reason}</div>
+                      )}
+                      {event.receiverName && (
+                        <div style={{ fontSize: 12, color: "#6d7175" }}>Receiver: {event.receiverName}</div>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </s-section>
+      </div>
+
+      {/* ── App event log ── */}
+      <s-section heading="Activity log">
+        {shipment.logs.length === 0 ? (
+          <div style={{ background: "#f6f6f7", border: "1px solid #e1e3e5", borderRadius: 8, padding: "20px", textAlign: "center", fontSize: 13, color: "#6d7175" }}>
+            No events recorded.
+          </div>
+        ) : (
+          <div style={{ background: "#fff", border: "1px solid #e1e3e5", borderRadius: 8, overflow: "hidden" }}>
+            {shipment.logs.map((log, i) => (
+              <div key={log.id} style={{ display: "flex", alignItems: "flex-start", gap: 12, padding: "10px 16px", borderBottom: i < shipment.logs.length - 1 ? "1px solid #f1f2f4" : "none" }}>
+                <EventLogBadge type={log.eventType} />
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  {log.message && <div style={{ fontSize: 13, color: "#202223" }}>{log.message}</div>}
+                  {(log.fromStatus || log.toStatus) && (
+                    <div style={{ fontSize: 12, color: "#6d7175", marginTop: 2 }}>
+                      {log.fromStatus && <span>{log.fromStatus}</span>}
+                      {log.fromStatus && log.toStatus && <span> → </span>}
+                      {log.toStatus && <span>{log.toStatus}</span>}
+                    </div>
+                  )}
+                </div>
+                <div style={{ fontSize: 11, color: "#8c9196", whiteSpace: "nowrap", flexShrink: 0 }}>
+                  {new Date(log.createdAt).toLocaleString()}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </s-section>
+
+    </s-page>
+  );
+}
+
+export function ErrorBoundary() {
+  return boundary.error(useRouteError());
+}
+
+===== F:\Nakson projects\leopard-booking\app\routes\app.shipments.export.jsx =====
+import { authenticate } from "../shopify.server";
+import { ensureStore } from "../services/store.server";
+import { listShipmentsForExport } from "../services/shipment.server";
+import { batchResolveCityNames } from "../services/city.server";
+
+const HEADERS = [
+  "Order",
+  "CN Number",
+  "Status",
+  "Leopards Status",
+  "Consignee",
+  "Phone",
+  "Address",
+  "COD",
+  "Weight (g)",
+  "Origin City",
+  "Destination City",
+  "Booked Date",
+  "Delivered Date",
+  "Cancelled Date",
+  "Last Error",
+];
+
+function escapeCell(value) {
+  if (value === null || value === undefined) return "";
+  const str = String(value);
+  if (/[",\n\r]/.test(str)) {
+    return `"${str.replace(/"/g, '""')}"`;
+  }
+  return str;
+}
+
+function formatDate(date) {
+  if (!date) return "";
+  return date instanceof Date ? date.toISOString() : String(date);
+}
+
+export const loader = async ({ request }) => {
+  const { session } = await authenticate.admin(request);
+  const store = await ensureStore(session);
+  const url = new URL(request.url);
+  const status = url.searchParams.get("status") ?? "";
+  const query = url.searchParams.get("query") ?? "";
+
+  const shipments = await listShipmentsForExport(store.id, status, query);
+
+  const cityIds = [];
+  for (const s of shipments) {
+    if (s.originCityId) cityIds.push(s.originCityId);
+    if (s.destinationCityId) cityIds.push(s.destinationCityId);
+  }
+  const cityNameMap = await batchResolveCityNames(store.id, cityIds);
+
+  const rows = [HEADERS.join(",")];
+  for (const s of shipments) {
+    rows.push(
+      [
+        s.shopifyOrderName,
+        s.cnNumber ?? "",
+        s.status,
+        s.leopardStatusRaw ?? "",
+        s.consigneeName,
+        s.consigneePhone,
+        s.consigneeAddress,
+        s.codAmount,
+        s.weightGrams,
+        s.originCityId ? cityNameMap.get(s.originCityId) ?? s.originCityId : "",
+        s.destinationCityId
+          ? cityNameMap.get(s.destinationCityId) ?? s.destinationCityId
+          : "",
+        formatDate(s.bookedAt),
+        formatDate(s.deliveredAt),
+        formatDate(s.cancelledAt),
+        s.lastError ?? "",
+      ]
+        .map(escapeCell)
+        .join(","),
+    );
+  }
+
+  const csv = rows.join("\r\n");
+
+  return new Response(csv, {
+    status: 200,
+    headers: {
+      "Content-Type": "text/csv; charset=utf-8",
+      "Content-Disposition": `attachment; filename="shipments-${new Date().toISOString().slice(0, 10)}.csv"`,
+      "Cache-Control": "private, no-store",
+    },
+  });
+};
+
+===== F:\Nakson projects\leopard-booking\app\routes\app.shipments.jsx =====
+import { useEffect, useState } from "react";
+import {
+  Form,
+  useFetcher,
+  useLoaderData,
+  useNavigation,
+  useRevalidator,
+  useRouteError,
+} from "react-router";
+import { useAppBridge } from "@shopify/app-bridge-react";
+import { boundary } from "@shopify/shopify-app-react-router/server";
+import { authenticate } from "../shopify.server";
+import { ensureStore } from "../services/store.server";
+import {
+  cancelShipments,
+  listShipments,
+  refreshShipmentStatuses,
+  refreshShipmentStatusesByDateRange,
+} from "../services/shipment.server";
+import { batchResolveCityNames } from "../services/city.server";
+import db from "../db.server";
+
+const ALL_STATUSES = ["PENDING", "BOOKED", "IN_TRANSIT", "DELIVERED", "RETURNED", "CANCELLED", "EXCEPTION"];
+
+const STATUS_STYLES = {
+  PENDING:    { dot: "#e8912d", bg: "#fff5ea", text: "#8a4b00",  label: "Not booked" },
+  BOOKED:     { dot: "#2c6ecb", bg: "#eaf4fb", text: "#0d3880",  label: "Booked" },
+  IN_TRANSIT: { dot: "#5c6ac4", bg: "#f0f0ff", text: "#3d3d8f",  label: "In transit" },
+  DELIVERED:  { dot: "#3d8b40", bg: "#e3f1df", text: "#1e542a",  label: "Delivered" },
+  RETURNED:   { dot: "#e8912d", bg: "#fff5ea", text: "#8a4b00",  label: "Returned" },
+  CANCELLED:  { dot: "#8c9196", bg: "#f6f6f7", text: "#444750",  label: "Cancelled" },
+  EXCEPTION:  { dot: "#d72c0d", bg: "#fce8e7", text: "#7f0007",  label: "Exception" },
+};
+
+const TERMINAL_STATUSES = ["DELIVERED", "CANCELLED", "RETURNED"];
+
+function daysAgoYMD(days) {
+  return new Date(Date.now() - days * 86_400_000).toISOString().slice(0, 10);
+}
+
+export const loader = async ({ request }) => {
+  const { session } = await authenticate.admin(request);
+  const store = await ensureStore(session);
+  const url = new URL(request.url);
+  const status = url.searchParams.get("status") ?? "";
+  const query = url.searchParams.get("query") ?? "";
+  const page = Number(url.searchParams.get("page") ?? "1");
+  const limit = 50;
+
+  const [{ shipments, total, pageCount }, statusCountRows] = await Promise.all([
+    listShipments(store.id, status, query, page, limit),
+    db.shipment.groupBy({ by: ["status"], where: { storeId: store.id }, _count: { _all: true } }),
+  ]);
+
+  const statusCounts = { ALL: 0 };
+  for (const row of statusCountRows) {
+    statusCounts[row.status] = row._count._all;
+    statusCounts.ALL += row._count._all;
+  }
+
+  const cityIdList = [];
+  for (const s of shipments) {
+    if (s.originCityId) cityIdList.push(s.originCityId);
+    if (s.destinationCityId) cityIdList.push(s.destinationCityId);
+  }
+  const cityNameMap = await batchResolveCityNames(store.id, cityIdList);
+  const cityNames = Object.fromEntries(
+    [...cityNameMap.entries()].map(([id, name]) => [id, name ?? String(id)]),
+  );
+
+  return {
+    status,
+    query,
+    page,
+    pageCount,
+    total,
+    perPage: limit,
+    cityNames,
+    statusCounts,
+    defaultFromDate: daysAgoYMD(7),
+    defaultToDate: daysAgoYMD(0),
+    shipments: shipments.map((s) => ({
+      ...s,
+      createdAt: s.createdAt.toISOString(),
+      updatedAt: s.updatedAt.toISOString(),
+      bookedAt: s.bookedAt?.toISOString() ?? null,
+      deliveredAt: s.deliveredAt?.toISOString() ?? null,
+      cancelledAt: s.cancelledAt?.toISOString() ?? null,
+    })),
+  };
+};
+
+export const action = async ({ request }) => {
+  const { session } = await authenticate.admin(request);
+  const store = await ensureStore(session);
+  const formData = await request.formData();
+  const intent = formData.get("intent");
+
+  const cnNumbers = String(formData.get("cnNumbers") ?? "")
+    .split(",").map((v) => v.trim()).filter(Boolean);
+
+  if (intent === "refresh")    return { ...await refreshShipmentStatuses(store.id, cnNumbers),  intent };
+  if (intent === "refreshAll") return { ...await refreshShipmentStatuses(store.id, []),         intent };
+  if (intent === "refreshByDate") {
+    const fromDate = String(formData.get("fromDate") ?? "").trim();
+    const toDate   = String(formData.get("toDate")   ?? "").trim();
+    if (!fromDate || !toDate) return { ok: false, message: "Both dates are required.", intent };
+    return { ...await refreshShipmentStatusesByDateRange(store.id, fromDate, toDate), intent };
+  }
+  if (intent === "cancel" || intent === "cancelBatch") {
+    return { ...await cancelShipments(store.id, cnNumbers), intent };
+  }
+  return { ok: false, message: "Unknown action.", intent };
+};
+
+function StatusPill({ status }) {
+  const s = STATUS_STYLES[status] || { dot: "#8c9196", bg: "#f6f6f7", text: "#444750", label: status };
+  return (
+    <span style={{ display: "inline-flex", alignItems: "center", gap: 5, padding: "3px 8px", borderRadius: 12, background: s.bg, color: s.text, fontSize: 12, fontWeight: 600, whiteSpace: "nowrap" }}>
+      <span style={{ width: 6, height: 6, borderRadius: "50%", background: s.dot, flexShrink: 0 }} />
+      {s.label}
+    </span>
+  );
+}
+
+function buildPageQuery({ status, query, page }) {
+  const p = new URLSearchParams();
+  if (status) p.set("status", status);
+  if (query) p.set("query", query);
+  if (page > 1) p.set("page", String(page));
+  return p.toString();
+}
+
+export default function Shipments() {
+  const {
+    shipments, status, query, page, pageCount, total, perPage,
+    cityNames, statusCounts, defaultFromDate, defaultToDate,
+  } = useLoaderData();
+
+  const fetcher = useFetcher();
+  const navigation = useNavigation();
+  const revalidator = useRevalidator();
+  const shopify = useAppBridge();
+
+  const [cancelTarget, setCancelTarget]             = useState(null);
+  const [selectedCns, setSelectedCns]               = useState(() => new Set());
+  const [batchCancelConfirm, setBatchCancelConfirm] = useState(false);
+  const [showSyncPanel, setShowSyncPanel]           = useState(false);
+  const [fromDate, setFromDate]                     = useState(defaultFromDate);
+  const [toDate, setToDate]                         = useState(defaultToDate);
+
+  const loading         = navigation.state === "loading";
+  const submittingCn    = fetcher.state !== "idle" ? fetcher.formData?.get("cnNumbers") : null;
+  const isRefreshAll    = fetcher.state !== "idle" && fetcher.formData?.get("intent") === "refreshAll";
+  const isRefreshByDate = fetcher.state !== "idle" && fetcher.formData?.get("intent") === "refreshByDate";
+  const isBatchCancel   = fetcher.state !== "idle" && fetcher.formData?.get("intent") === "cancelBatch";
+
+  useEffect(() => {
+    if (!fetcher.data) return;
+    if (fetcher.data.message) {
+      shopify.toast.show(fetcher.data.message, { isError: !fetcher.data.ok });
+    }
+    if (fetcher.data.ok) {
+      const intent = fetcher.data.intent;
+      // Revalidate loader so the table shows fresh statuses after any successful action.
+      revalidator.revalidate();
+      if (intent === "cancelBatch") { setSelectedCns(new Set()); setBatchCancelConfirm(false); }
+      if (intent === "cancel")      setCancelTarget(null);
+    }
+  }, [fetcher.data, shopify]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  function toggleCn(cn) {
+    setSelectedCns((prev) => { const n = new Set(prev); n.has(cn) ? n.delete(cn) : n.add(cn); return n; });
+  }
+
+  const selectableShipments = shipments.filter((s) => s.cnNumber && !TERMINAL_STATUSES.includes(s.status));
+  const allSelectableSelected = selectableShipments.length > 0 && selectableShipments.every((s) => selectedCns.has(s.cnNumber));
+
+  const exportHref = `/app/shipments/export?${new URLSearchParams({ ...(status ? { status } : {}), ...(query ? { query } : {}) })}`;
+  const startCount = total === 0 ? 0 : (page - 1) * perPage + 1;
+  const endCount   = Math.min(page * perPage, total);
+
+  return (
+    <s-page heading="Shipments">
+
+      {/* ── Status tabs with counts ── */}
+      <s-section>
+        <div style={{ display: "flex", gap: 4, flexWrap: "wrap", marginBottom: 12 }}>
+          {[{ key: "", label: "All", count: statusCounts.ALL }, ...ALL_STATUSES.map((s) => ({ key: s, label: STATUS_STYLES[s]?.label ?? s, count: statusCounts[s] ?? 0 }))].map(({ key, label, count }) => {
+            const isActive = status === key;
+            const style = STATUS_STYLES[key];
+            return (
+              <a
+                key={key}
+                href={`/app/shipments?${buildPageQuery({ status: key, query, page: 1 })}`}
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: 6,
+                  padding: "6px 12px",
+                  borderRadius: 20,
+                  fontSize: 13,
+                  fontWeight: isActive ? 700 : 500,
+                  textDecoration: "none",
+                  background: isActive ? (style?.bg ?? "#f0f0ff") : "#f6f6f7",
+                  color: isActive ? (style?.text ?? "#3d3d8f") : "#444750",
+                  border: isActive ? `1.5px solid ${style?.dot ?? "#5c6ac4"}` : "1.5px solid transparent",
+                  transition: "all 0.1s",
+                }}
+              >
+                {key && style && <span style={{ width: 6, height: 6, borderRadius: "50%", background: style.dot }} />}
+                {label}
+                {count > 0 && (
+                  <span style={{ fontSize: 11, fontWeight: 700, padding: "1px 6px", borderRadius: 10, background: isActive ? (style?.dot ?? "#5c6ac4") : "#e1e3e5", color: isActive ? "#fff" : "#444750", minWidth: 18, textAlign: "center" }}>
+                    {count}
+                  </span>
+                )}
+              </a>
+            );
+          })}
+        </div>
+
+        {/* Search row — plain Form (GET) so it never shares state with the POST fetcher */}
+        <Form method="get" style={{ display: "contents" }}>
+          <input type="hidden" name="status" value={status} />
+          <div style={{ display: "flex", gap: 10, alignItems: "flex-end", flexWrap: "wrap" }}>
+            <div style={{ flex: "1 1 260px" }}>
+              <s-text-field
+                label="Search"
+                name="query"
+                defaultValue={query}
+                placeholder="CN number, order name, consignee…"
+              />
+            </div>
+            <s-button type="submit">Search</s-button>
+            {(status || query) && <s-button href="/app/shipments">Clear</s-button>}
+            <s-button href={exportHref}>Export CSV</s-button>
+          </div>
+        </Form>
+      </s-section>
+
+      {/* ── Sync tools ── */}
+      <s-section>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 10 }}>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <s-button
+              variant="primary"
+              disabled={isRefreshAll}
+              loading={isRefreshAll}
+              onClick={() => fetcher.submit({ intent: "refreshAll" }, { method: "post", action: "/app/shipments" })}
+            >
+              Sync all statuses
+            </s-button>
+          </div>
+          <button
+            onClick={() => setShowSyncPanel((v) => !v)}
+            style={{ background: "none", border: "1px solid #c9cccf", borderRadius: 6, padding: "6px 12px", fontSize: 13, cursor: "pointer", color: "#444750", fontWeight: 500 }}
+          >
+            {showSyncPanel ? "▲ Hide date sync" : "▼ Sync by date range"}
+          </button>
+        </div>
+
+        {showSyncPanel && (
+          <div style={{ marginTop: 12, padding: "14px 16px", background: "#f6f6f7", borderRadius: 8, border: "1px solid #e1e3e5" }}>
+            <div style={{ fontSize: 12, color: "#6d7175", marginBottom: 10, fontWeight: 500 }}>
+              Fetch latest status for all shipments booked within a date range
+            </div>
+            <div style={{ display: "flex", gap: 12, alignItems: "flex-end", flexWrap: "wrap" }}>
+              <div>
+                <s-text-field
+                  label="From"
+                  type="date"
+                  value={fromDate}
+                  onChange={(e) => setFromDate(e.target?.value ?? e.currentTarget?.value ?? fromDate)}
+                />
+              </div>
+              <div>
+                <s-text-field
+                  label="To"
+                  type="date"
+                  value={toDate}
+                  onChange={(e) => setToDate(e.target?.value ?? e.currentTarget?.value ?? toDate)}
+                />
+              </div>
+              <s-button
+                disabled={isRefreshByDate}
+                loading={isRefreshByDate}
+                onClick={() => fetcher.submit({ intent: "refreshByDate", fromDate, toDate }, { method: "post", action: "/app/shipments" })}
+              >
+                Sync date range
+              </s-button>
+            </div>
+          </div>
+        )}
+      </s-section>
+
+      {/* ── Batch action bar ── */}
+      {selectedCns.size > 0 && (
+        <s-section>
+          <div style={{ background: "#f0f0ff", border: "1px solid #5c6ac4", borderRadius: 8, padding: "12px 16px", display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+            <div style={{ fontWeight: 600, fontSize: 14, color: "#3d3d8f" }}>{selectedCns.size} selected</div>
+            <s-button
+              tone="critical"
+              disabled={isBatchCancel}
+              loading={isBatchCancel}
+              onClick={() => setBatchCancelConfirm(true)}
+            >
+              Cancel {selectedCns.size} shipment{selectedCns.size !== 1 ? "s" : ""}
+            </s-button>
+            <s-button onClick={() => setSelectedCns(new Set())} disabled={isBatchCancel}>
+              Clear selection
+            </s-button>
+          </div>
+        </s-section>
+      )}
+
+      {/* ── Batch cancel confirmation ── */}
+      {batchCancelConfirm && (
+        <s-section>
+          <div style={{ background: "#fce8e7", border: "1px solid #d72c0d", borderRadius: 8, padding: "16px 20px" }}>
+            <div style={{ fontWeight: 700, fontSize: 14, color: "#7f0007", marginBottom: 6 }}>
+              Cancel {selectedCns.size} shipment{selectedCns.size !== 1 ? "s" : ""}?
+            </div>
+            <div style={{ fontSize: 13, color: "#b40007", marginBottom: 12 }}>
+              This will cancel them with Leopards Courier and cannot be undone.
+              CNs: <span style={{ fontFamily: "monospace" }}>{Array.from(selectedCns).join(", ")}</span>
+            </div>
+            <div style={{ display: "flex", gap: 8 }}>
+              <s-button
+                tone="critical"
+                disabled={isBatchCancel}
+                loading={isBatchCancel}
+                onClick={() => {
+                  setBatchCancelConfirm(false);
+                  fetcher.submit(
+                    { intent: "cancelBatch", cnNumbers: Array.from(selectedCns).join(",") },
+                    { method: "post", action: "/app/shipments" },
+                  );
+                }}
+              >
+                Yes, cancel all
+              </s-button>
+              <s-button onClick={() => setBatchCancelConfirm(false)} disabled={isBatchCancel}>
+                Go back
+              </s-button>
+            </div>
+          </div>
+        </s-section>
+      )}
+
+      {/* ── Single cancel confirmation ── */}
+      {cancelTarget && (
+        <s-section>
+          <div style={{ background: "#fce8e7", border: "1px solid #d72c0d", borderRadius: 8, padding: "16px 20px" }}>
+            <div style={{ fontWeight: 700, fontSize: 14, color: "#7f0007", marginBottom: 6 }}>
+              Cancel shipment <span style={{ fontFamily: "monospace" }}>{cancelTarget}</span>?
+            </div>
+            <div style={{ fontSize: 13, color: "#b40007", marginBottom: 12 }}>
+              This will cancel it with Leopards Courier and cannot be undone.
+            </div>
+            <div style={{ display: "flex", gap: 8 }}>
+              <s-button
+                tone="critical"
+                disabled={submittingCn === cancelTarget}
+                loading={submittingCn === cancelTarget}
+                onClick={() => {
+                  fetcher.submit({ intent: "cancel", cnNumbers: cancelTarget }, { method: "post", action: "/app/shipments" });
+                }}
+              >
+                Yes, cancel
+              </s-button>
+              <s-button onClick={() => setCancelTarget(null)} disabled={submittingCn === cancelTarget}>
+                Go back
+              </s-button>
+            </div>
+          </div>
+        </s-section>
+      )}
+
+      {/* ── Table ── */}
+      <s-section>
+        {loading ? (
+          <div style={{ padding: "40px 20px", textAlign: "center", color: "#6d7175", fontSize: 13 }}>
+            Loading shipments…
+          </div>
+        ) : shipments.length === 0 ? (
+          <div style={{ background: "#f6f6f7", border: "1px solid #e1e3e5", borderRadius: 8, padding: "48px 20px", textAlign: "center" }}>
+            <div style={{ fontSize: 36, marginBottom: 10 }}>📭</div>
+            <div style={{ fontWeight: 700, fontSize: 15, color: "#202223", marginBottom: 4 }}>
+              {status || query ? "No shipments match this filter" : "No shipments yet"}
+            </div>
+            <div style={{ fontSize: 13, color: "#6d7175" }}>
+              {status && `Filtered by status: ${STATUS_STYLES[status]?.label ?? status}.`}
+              {query && ` Searching for: "${query}".`}
+              {!status && !query && "Booked orders will appear here."}
+            </div>
+            {(status || query) && (
+              <a href="/app/shipments" style={{ display: "inline-block", marginTop: 12, padding: "7px 16px", background: "#5c6ac4", color: "#fff", borderRadius: 6, fontSize: 13, fontWeight: 600, textDecoration: "none" }}>
+                Clear filters
+              </a>
+            )}
+          </div>
+        ) : (
+          <>
+            <s-table>
+              <s-table-header-row>
+                <s-table-header>
+                  <s-checkbox
+                    checked={allSelectableSelected}
+                    onChange={() => allSelectableSelected
+                      ? setSelectedCns(new Set())
+                      : setSelectedCns(new Set(selectableShipments.map((s) => s.cnNumber)))
+                    }
+                    disabled={selectableShipments.length === 0}
+                  />
+                </s-table-header>
+                <s-table-header>Order</s-table-header>
+                <s-table-header>CN Number</s-table-header>
+                <s-table-header>Status</s-table-header>
+                <s-table-header>Consignee</s-table-header>
+                <s-table-header>Destination</s-table-header>
+                <s-table-header>COD</s-table-header>
+                <s-table-header>Date</s-table-header>
+                <s-table-header>Actions</s-table-header>
+              </s-table-header-row>
+              <s-table-body>
+                {shipments.map((shipment) => {
+                  const isThisRowBusy = submittingCn === shipment.cnNumber;
+                  const isTerminal    = TERMINAL_STATUSES.includes(shipment.status);
+                  const isSelectable  = shipment.cnNumber && !isTerminal;
+
+                  const relevantDate =
+                    shipment.deliveredAt ?? shipment.cancelledAt ?? shipment.bookedAt;
+
+                  return (
+                    <s-table-row key={shipment.id}>
+                      <s-table-cell>
+                        <s-checkbox
+                          checked={selectedCns.has(shipment.cnNumber)}
+                          disabled={!isSelectable}
+                          onChange={() => toggleCn(shipment.cnNumber)}
+                        />
+                      </s-table-cell>
+
+                      <s-table-cell>
+                        <s-link href={`/app/shipments/${shipment.id}`}>
+                          <span style={{ fontWeight: 600 }}>{shipment.shopifyOrderName}</span>
+                        </s-link>
+                      </s-table-cell>
+
+                      <s-table-cell>
+                        {shipment.slipLink ? (
+                          <s-link href={shipment.slipLink} target="_blank">
+                            <span style={{ fontFamily: "monospace", fontSize: 13 }}>{shipment.cnNumber}</span>
+                          </s-link>
+                        ) : (
+                          <span style={{ fontFamily: "monospace", fontSize: 13, color: shipment.cnNumber ? "#202223" : "#8c9196" }}>
+                            {shipment.cnNumber || "—"}
+                          </span>
+                        )}
+                      </s-table-cell>
+
+                      <s-table-cell>
+                        <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+                          <StatusPill status={shipment.status} />
+                          {shipment.leopardStatusRaw &&
+                            shipment.leopardStatusRaw.toLowerCase() !== (STATUS_STYLES[shipment.status]?.label ?? "").toLowerCase() && (
+                            <span style={{ fontSize: 11, color: "#8c9196" }}>{shipment.leopardStatusRaw}</span>
+                          )}
+                          {shipment.lastError && (
+                            <span style={{ fontSize: 11, color: "#d72c0d", maxWidth: 160, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={shipment.lastError}>
+                              {shipment.lastError}
+                            </span>
+                          )}
+                        </div>
+                      </s-table-cell>
+
+                      <s-table-cell>
+                        <div style={{ fontSize: 13, color: "#202223" }}>{shipment.consigneeName}</div>
+                        {shipment.consigneePhone && (
+                          <div style={{ fontSize: 11, color: "#8c9196", marginTop: 1 }}>{shipment.consigneePhone}</div>
+                        )}
+                      </s-table-cell>
+
+                      <s-table-cell>
+                        <span style={{ fontSize: 13, color: "#444750" }}>
+                          {shipment.destinationCityId
+                            ? cityNames[shipment.destinationCityId] ?? shipment.destinationCityId
+                            : "—"}
+                        </span>
+                      </s-table-cell>
+
+                      <s-table-cell>
+                        {shipment.codAmount > 0 ? (
+                          <span style={{ fontSize: 13, fontWeight: 600, color: "#202223" }}>{shipment.codAmount.toLocaleString()}</span>
+                        ) : (
+                          <span style={{ fontSize: 12, color: "#8c9196" }}>—</span>
+                        )}
+                      </s-table-cell>
+
+                      <s-table-cell>
+                        {relevantDate ? (
+                          <div>
+                            <div style={{ fontSize: 13, color: "#202223" }}>{new Date(relevantDate).toLocaleDateString()}</div>
+                            <div style={{ fontSize: 11, color: "#8c9196" }}>
+                              {shipment.deliveredAt ? "delivered" : shipment.cancelledAt ? "cancelled" : "booked"}
+                            </div>
+                          </div>
+                        ) : "—"}
+                      </s-table-cell>
+
+                      <s-table-cell>
+                        <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                          <s-button href={`/app/shipments/${shipment.id}`}>View</s-button>
+                          {!isTerminal && shipment.cnNumber && (
+                            <s-button
+                              tone="critical"
+                              disabled={isThisRowBusy}
+                              loading={isThisRowBusy}
+                              onClick={() => setCancelTarget(shipment.cnNumber)}
+                            >
+                              Cancel
+                            </s-button>
+                          )}
+                        </div>
+                      </s-table-cell>
+                    </s-table-row>
+                  );
+                })}
+              </s-table-body>
+            </s-table>
+          </>
+        )}
+      </s-section>
+
+      {/* ── Pagination ── */}
+      {shipments.length > 0 && pageCount > 1 && (
+        <s-section>
+          <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+            <s-button
+              href={page > 1 ? `/app/shipments?${buildPageQuery({ status, query, page: page - 1 })}` : undefined}
+              disabled={page <= 1}
+            >
+              ← Previous
+            </s-button>
+            <span style={{ fontSize: 13, color: "#6d7175" }}>
+              {startCount}–{endCount} of {total}
+            </span>
+            <s-button
+              href={page < pageCount ? `/app/shipments?${buildPageQuery({ status, query, page: page + 1 })}` : undefined}
+              disabled={page >= pageCount}
+            >
+              Next →
+            </s-button>
+          </div>
+        </s-section>
+      )}
+
+    </s-page>
+  );
+}
+
+export function ErrorBoundary() {
+  return boundary.error(useRouteError());
+}
+
+===== F:\Nakson projects\leopard-booking\app\routes\app._index.jsx =====
+import { useState } from "react";
+import { boundary } from "@shopify/shopify-app-react-router/server";
+import { useLoaderData, useRouteError } from "react-router";
+import { useAppBridge } from "@shopify/app-bridge-react";
+import { authenticate } from "../shopify.server";
+import { ensureStore } from "../services/store.server";
+import { getDashboard } from "../services/dashboard.server";
+
+export const loader = async ({ request }) => {
+  const { session } = await authenticate.admin(request);
+  const store = await ensureStore(session);
+  return getDashboard(store.id);
+};
+
+const STATUS_STYLES = {
+  PENDING:    { dot: "#e8912d", bg: "#fff5ea", text: "#8a4b00", label: "Not booked" },
+  BOOKED:     { dot: "#2c6ecb", bg: "#eaf4fb", text: "#0d3880", label: "Booked" },
+  IN_TRANSIT: { dot: "#5c6ac4", bg: "#f0f0ff", text: "#3d3d8f", label: "In transit" },
+  DELIVERED:  { dot: "#3d8b40", bg: "#e3f1df", text: "#1e542a", label: "Delivered" },
+  RETURNED:   { dot: "#e8912d", bg: "#fff5ea", text: "#8a4b00", label: "Returned" },
+  CANCELLED:  { dot: "#8c9196", bg: "#f6f6f7", text: "#444750", label: "Cancelled" },
+  EXCEPTION:  { dot: "#d72c0d", bg: "#fce8e7", text: "#7f0007", label: "Exception" },
+};
+
+const EVENT_LABELS = {
+  BOOKED:        "Booked",
+  CANCELLED:     "Cancelled",
+  STATUS_CHANGE: "Status updated",
+  ERROR:         "Error",
+};
+
+function eventDotColor(type) {
+  if (type === "ERROR" || type === "CANCELLED") return "#d72c0d";
+  if (type === "BOOKED") return "#3d8b40";
+  return "#5c6ac4";
+}
+
+function eventBadgeStyle(type) {
+  if (type === "ERROR")     return { bg: "#fce8e7", text: "#7f0007" };
+  if (type === "CANCELLED") return { bg: "#fce8e7", text: "#7f0007" };
+  if (type === "BOOKED")    return { bg: "#e3f1df", text: "#1e542a" };
+  return { bg: "#f0f0ff", text: "#3d3d8f" };
+}
+
+function formatRelative(iso) {
+  const diff = Date.now() - new Date(iso).getTime();
+  if (diff < 60_000) return "just now";
+  const mins = Math.floor(diff / 60_000);
+  if (mins < 60) return `${mins}m ago`;
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24) return `${hrs}h ago`;
+  return new Date(iso).toLocaleDateString();
+}
+
+function MetricCard({ label, value, color, sublabel, href }) {
+  const inner = (
+    <div style={{
+      background: "#fff",
+      border: "1px solid #e1e3e5",
+      borderLeft: `4px solid ${color}`,
+      borderRadius: 8,
+      padding: "16px 18px",
+      height: "100%",
+      boxSizing: "border-box",
+    }}>
+      <div style={{ fontSize: 11, color: "#6d7175", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 8 }}>
+        {label}
+      </div>
+      <div style={{ fontSize: 34, fontWeight: 700, color: "#1a1c1e", lineHeight: 1 }}>
+        {value ?? 0}
+      </div>
+      {sublabel && (
+        <div style={{ fontSize: 12, color: "#6d7175", marginTop: 6 }}>{sublabel}</div>
+      )}
+    </div>
+  );
+  return href
+    ? <a href={href} style={{ textDecoration: "none", display: "block" }}>{inner}</a>
+    : inner;
+}
+
+function QuickActionBtn({ href, children, primary }) {
+  return (
+    <a
+      href={href}
+      style={{
+        display: "inline-block",
+        padding: "10px 20px",
+        background: primary ? "#5c6ac4" : "#fff",
+        color: primary ? "#fff" : "#202223",
+        border: primary ? "none" : "1px solid #c9cccf",
+        borderRadius: 6,
+        fontWeight: 600,
+        fontSize: 14,
+        textDecoration: "none",
+        whiteSpace: "nowrap",
+      }}
+    >
+      {children}
+    </a>
+  );
+}
+
+export default function Dashboard() {
+  const {
+    counts,
+    awaitingBooking,
+    failedBookings,
+    bookedToday,
+    hasCredentials,
+    hasOriginCity,
+    recentLogs,
+    recentLoadsheets,
+  } = useLoaderData();
+
+  const shopify = useAppBridge();
+  const [downloadingId, setDownloadingId] = useState(null);
+
+  async function handleDownload(loadSheetId) {
+    setDownloadingId(loadSheetId);
+    try {
+      const res = await fetch(`/app/loadsheets/download?loadSheetId=${encodeURIComponent(loadSheetId)}`);
+      if (!res.ok) throw new Error(await res.text());
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const win = window.open(url, "_blank");
+      if (win) {
+        setTimeout(() => URL.revokeObjectURL(url), 30_000);
+      } else {
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = `loadsheet-${loadSheetId}.pdf`;
+        a.click();
+        setTimeout(() => URL.revokeObjectURL(url), 5_000);
+      }
+    } catch {
+      shopify.toast.show("Could not download load sheet.", { isError: true });
+    } finally {
+      setDownloadingId(null);
+    }
+  }
+
+  const isSetupComplete = hasCredentials && hasOriginCity;
+  const needsAttentionCount = (awaitingBooking ?? 0) + (failedBookings ?? 0) + (counts.EXCEPTION ?? 0);
+  const inFlightCount = (counts.BOOKED ?? 0) + (counts.IN_TRANSIT ?? 0);
+
+  return (
+    <s-page heading="Dashboard">
+
+      {/* ── Setup checklist ── */}
+      {!isSetupComplete && (
+        <s-section>
+          <div style={{ background: "#fff8ec", border: "1px solid #e8912d", borderRadius: 8, padding: "16px 20px" }}>
+            <div style={{ display: "flex", gap: 12, alignItems: "flex-start" }}>
+              <div style={{ fontSize: 22, flexShrink: 0 }}>⚙️</div>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontWeight: 700, fontSize: 14, color: "#5c3500", marginBottom: 8 }}>
+                  Complete setup to start booking shipments
+                </div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                  {[
+                    { done: hasCredentials, label: "Save your Leopards API credentials" },
+                    { done: hasCredentials, label: "Test connection and refresh city list" },
+                    { done: hasOriginCity, label: "Set origin city and shipper details" },
+                  ].map((step, i) => (
+                    <div key={i} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: step.done ? "#3d8b40" : "#8a4b00" }}>
+                      <span style={{ fontSize: 15 }}>{step.done ? "✅" : "⬜"}</span>
+                      <span style={{ textDecoration: step.done ? "line-through" : "none", opacity: step.done ? 0.6 : 1 }}>{step.label}</span>
+                    </div>
+                  ))}
+                </div>
+                <a
+                  href="/app/settings"
+                  style={{ display: "inline-block", marginTop: 12, padding: "7px 16px", background: "#e8912d", color: "#fff", borderRadius: 6, fontSize: 13, fontWeight: 600, textDecoration: "none" }}
+                >
+                  Open Settings →
+                </a>
+              </div>
+            </div>
+          </div>
+        </s-section>
+      )}
+
+      {/* ── Needs attention alert ── */}
+      {needsAttentionCount > 0 && isSetupComplete && (
+        <s-section>
+          <div style={{ background: "#fce8e7", border: "1px solid #d72c0d", borderRadius: 8, padding: "14px 18px", display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 12 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+              <span style={{ fontSize: 20 }}>🔴</span>
+              <div>
+                <div style={{ fontWeight: 700, fontSize: 14, color: "#7f0007" }}>
+                  {needsAttentionCount} shipment{needsAttentionCount !== 1 ? "s" : ""} need attention
+                </div>
+                <div style={{ fontSize: 12, color: "#b40007", marginTop: 2 }}>
+                  {[
+                    awaitingBooking > 0 && `${awaitingBooking} unbooked`,
+                    failedBookings > 0 && `${failedBookings} booking failed`,
+                    counts.EXCEPTION > 0 && `${counts.EXCEPTION} exception${counts.EXCEPTION > 1 ? "s" : ""}`,
+                  ].filter(Boolean).join(" · ")}
+                </div>
+              </div>
+            </div>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              {(awaitingBooking > 0 || failedBookings > 0) && (
+                <a href="/app/orders" style={{ padding: "7px 14px", background: "#d72c0d", color: "#fff", borderRadius: 6, fontSize: 13, fontWeight: 600, textDecoration: "none" }}>
+                  Book now →
+                </a>
+              )}
+              {counts.EXCEPTION > 0 && (
+                <a href="/app/shipments?status=EXCEPTION" style={{ padding: "7px 14px", background: "#fff", color: "#d72c0d", border: "1px solid #d72c0d", borderRadius: 6, fontSize: 13, fontWeight: 600, textDecoration: "none" }}>
+                  View exceptions
+                </a>
+              )}
+            </div>
+          </div>
+        </s-section>
+      )}
+
+      {/* ── Primary KPI row ── */}
+      <s-section heading="Today's performance">
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", gap: 12 }}>
+          <MetricCard label="Booked today" value={bookedToday} color="#3d8b40" sublabel="new bookings" href="/app/shipments?status=BOOKED" />
+          <MetricCard label="In transit" value={inFlightCount} color="#5c6ac4" sublabel="active shipments" href="/app/shipments?status=IN_TRANSIT" />
+          <MetricCard label="Delivered" value={counts.DELIVERED} color="#3d8b40" sublabel="all time" href="/app/shipments?status=DELIVERED" />
+          <MetricCard
+            label="Need booking"
+            value={(awaitingBooking ?? 0) + (failedBookings ?? 0)}
+            color={(awaitingBooking ?? 0) + (failedBookings ?? 0) > 0 ? "#d72c0d" : "#8c9196"}
+            sublabel="pending orders"
+            href="/app/orders"
+          />
+        </div>
+      </s-section>
+
+      {/* ── Secondary KPI row ── */}
+      <s-section heading="All-time breakdown">
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(130px, 1fr))", gap: 10 }}>
+          <MetricCard label="Total" value={counts.total} color="#5c6ac4" />
+          <MetricCard label="Returned" value={counts.RETURNED} color="#e8912d" href="/app/shipments?status=RETURNED" />
+          <MetricCard label="Cancelled" value={counts.CANCELLED} color="#8c9196" href="/app/shipments?status=CANCELLED" />
+          <MetricCard label="Exceptions" value={counts.EXCEPTION} color={counts.EXCEPTION > 0 ? "#d72c0d" : "#8c9196"} href="/app/shipments?status=EXCEPTION" />
+        </div>
+      </s-section>
+
+      {/* ── Shipment health bar ── */}
+      {counts.total > 0 && (
+        <s-section heading="Shipment health">
+          <div style={{ background: "#fff", border: "1px solid #e1e3e5", borderRadius: 8, padding: "16px 20px" }}>
+            {/* Stacked bar */}
+            <div style={{ display: "flex", height: 10, borderRadius: 5, overflow: "hidden", marginBottom: 14, background: "#f1f2f4" }}>
+              {[
+                { key: "DELIVERED",  color: "#3d8b40" },
+                { key: "IN_TRANSIT", color: "#5c6ac4" },
+                { key: "BOOKED",     color: "#2c6ecb" },
+                { key: "RETURNED",   color: "#e8912d" },
+                { key: "EXCEPTION",  color: "#d72c0d" },
+                { key: "CANCELLED",  color: "#c4cdd5" },
+                { key: "PENDING",    color: "#e4e5e7" },
+              ].map(({ key, color }) => {
+                const pct = ((counts[key] ?? 0) / counts.total) * 100;
+                return pct > 0
+                  ? <div key={key} style={{ flex: `0 0 ${pct}%`, background: color }} />
+                  : null;
+              })}
+            </div>
+            {/* Legend */}
+            <div style={{ display: "flex", flexWrap: "wrap", gap: "6px 18px" }}>
+              {Object.entries(STATUS_STYLES).map(([key, s]) =>
+                counts[key] > 0 ? (
+                  <div key={key} style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12 }}>
+                    <span style={{ width: 8, height: 8, borderRadius: "50%", background: s.dot, flexShrink: 0 }} />
+                    <span style={{ color: "#444750", fontWeight: 600 }}>{s.label}</span>
+                    <span style={{ color: "#8c9196" }}>{counts[key]}</span>
+                  </div>
+                ) : null
+              )}
+            </div>
+          </div>
+        </s-section>
+      )}
+
+      {/* ── Quick actions ── */}
+      <s-section heading="Quick actions">
+        <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+          <QuickActionBtn href="/app/orders" primary>Book orders</QuickActionBtn>
+          <QuickActionBtn href="/app/shipments">View shipments</QuickActionBtn>
+          <QuickActionBtn href="/app/loadsheets">Generate loadsheet</QuickActionBtn>
+          <QuickActionBtn href="/app/settings">Settings</QuickActionBtn>
+        </div>
+      </s-section>
+
+      {/* ── Recent activity feed ── */}
+      <s-section heading="Recent activity">
+        {recentLogs?.length ? (
+          <div style={{ background: "#fff", border: "1px solid #e1e3e5", borderRadius: 8, overflow: "hidden" }}>
+            {recentLogs.map((log, i) => {
+              const badge = eventBadgeStyle(log.eventType);
+              return (
+                <div key={log.id} style={{ display: "flex", alignItems: "flex-start", gap: 12, padding: "12px 16px", borderBottom: i < recentLogs.length - 1 ? "1px solid #f1f2f4" : "none" }}>
+                  <div style={{ width: 8, height: 8, borderRadius: "50%", background: eventDotColor(log.eventType), flexShrink: 0, marginTop: 5 }} />
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                      <span style={{ fontWeight: 600, fontSize: 13, color: "#202223" }}>{log.orderName}</span>
+                      {log.cnNumber && (
+                        <span style={{ fontSize: 12, color: "#6d7175", fontFamily: "monospace", background: "#f6f6f7", padding: "1px 5px", borderRadius: 4 }}>
+                          {log.cnNumber}
+                        </span>
+                      )}
+                      <span style={{ fontSize: 11, padding: "2px 7px", borderRadius: 10, background: badge.bg, color: badge.text, fontWeight: 600 }}>
+                        {EVENT_LABELS[log.eventType] ?? log.eventType}
+                      </span>
+                    </div>
+                    {log.message && (
+                      <div style={{ fontSize: 12, color: "#6d7175", marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                        {log.message}
+                      </div>
+                    )}
+                  </div>
+                  <div style={{ fontSize: 11, color: "#8c9196", flexShrink: 0, whiteSpace: "nowrap" }}>
+                    {formatRelative(log.createdAt)}
+                  </div>
+                </div>
+              );
+            })}
+            <div style={{ padding: "10px 16px", background: "#f6f6f7", borderTop: "1px solid #e1e3e5" }}>
+              <a href="/app/shipments" style={{ fontSize: 13, color: "#5c6ac4", fontWeight: 600, textDecoration: "none" }}>
+                View all shipments →
+              </a>
+            </div>
+          </div>
+        ) : (
+          <div style={{ background: "#f6f6f7", border: "1px solid #e1e3e5", borderRadius: 8, padding: "40px 20px", textAlign: "center" }}>
+            <div style={{ fontSize: 36, marginBottom: 10 }}>📦</div>
+            <div style={{ fontWeight: 700, fontSize: 15, color: "#202223", marginBottom: 4 }}>No shipment activity yet</div>
+            <div style={{ fontSize: 13, color: "#6d7175", marginBottom: 16 }}>
+              {isSetupComplete ? "Book your first order to see activity here." : "Complete setup first, then book your first order."}
+            </div>
+            <a
+              href={isSetupComplete ? "/app/orders" : "/app/settings"}
+              style={{ padding: "8px 18px", background: "#5c6ac4", color: "#fff", borderRadius: 6, fontSize: 13, fontWeight: 600, textDecoration: "none" }}
+            >
+              {isSetupComplete ? "Book an order" : "Open Settings"}
+            </a>
+          </div>
+        )}
+      </s-section>
+
+      {/* ── Recent load sheets ── */}
+      {recentLoadsheets?.length > 0 && (
+        <s-section heading="Recent load sheets">
+          <div style={{ background: "#fff", border: "1px solid #e1e3e5", borderRadius: 8, overflow: "hidden" }}>
+            {recentLoadsheets.map((ls, i) => (
+              <div key={ls.id} style={{ display: "flex", alignItems: "center", gap: 12, padding: "12px 16px", borderBottom: i < recentLoadsheets.length - 1 ? "1px solid #f1f2f4" : "none" }}>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontWeight: 600, fontSize: 13, color: "#202223", fontFamily: "monospace" }}>{ls.loadSheetId}</div>
+                  <div style={{ fontSize: 12, color: "#6d7175", marginTop: 2 }}>
+                    {ls.cnCount} shipment{ls.cnCount !== 1 ? "s" : ""} · {new Date(ls.createdAt).toLocaleDateString()}
+                  </div>
+                </div>
+                <span style={{ padding: "2px 8px", borderRadius: 12, fontSize: 11, fontWeight: 600, background: ls.status === "downloaded" ? "#e3f1df" : "#eaf4fb", color: ls.status === "downloaded" ? "#1e542a" : "#084e8a", whiteSpace: "nowrap" }}>
+                  {ls.status === "downloaded" ? "Downloaded" : "Generated"}
+                </span>
+                <button
+                  onClick={() => handleDownload(ls.loadSheetId)}
+                  disabled={downloadingId === ls.loadSheetId}
+                  style={{ padding: "6px 12px", background: "#fff", border: "1px solid #c9cccf", borderRadius: 6, fontSize: 12, fontWeight: 600, cursor: "pointer", color: "#202223", flexShrink: 0, opacity: downloadingId === ls.loadSheetId ? 0.6 : 1 }}
+                >
+                  {downloadingId === ls.loadSheetId ? "…" : "Download PDF"}
+                </button>
+              </div>
+            ))}
+            <div style={{ padding: "10px 16px", background: "#f6f6f7", borderTop: "1px solid #e1e3e5" }}>
+              <a href="/app/loadsheets" style={{ fontSize: 13, color: "#5c6ac4", fontWeight: 600, textDecoration: "none" }}>
+                View all load sheets →
+              </a>
+            </div>
+          </div>
+        </s-section>
+      )}
+
+    </s-page>
+  );
+}
+
+export function ErrorBoundary() {
+  return boundary.error(useRouteError());
+}
+
+===== F:\Nakson projects\leopard-booking\app\routes\auth.$.jsx =====
+import { boundary } from "@shopify/shopify-app-react-router/server";
+import { authenticate } from "../shopify.server";
+
+export const loader = async ({ request }) => {
+  await authenticate.admin(request);
+
+  return null;
+};
+
+export const headers = (headersArgs) => {
+  return boundary.headers(headersArgs);
+};
+
+===== F:\Nakson projects\leopard-booking\app\routes\gdpr.webhooks.customers_data_request.jsx =====
+import { authenticate } from "../shopify.server";
+
+export const action = async ({ request }) => {
+  let shop, topic;
+  try {
+    ({ shop, topic } = await authenticate.webhook(request));
+  } catch (err) {
+    if (err instanceof Response) throw err;
+    console.error("[webhook] authenticate failed:", err);
+    return new Response("Bad Request", { status: 400 });
+  }
+
+  console.log(`Received ${topic} webhook for ${shop}`);
+
+  return new Response("OK", { status: 200 });
+};
+
+===== F:\Nakson projects\leopard-booking\app\routes\gdpr.webhooks.customers_redact.jsx =====
+import { authenticate } from "../shopify.server";
+import db from "../db.server";
+
+export const action = async ({ request }) => {
+  let shop, topic, payload;
+  try {
+    ({ shop, topic, payload } = await authenticate.webhook(request));
+  } catch (err) {
+    if (err instanceof Response) throw err;
+    console.error("[webhook] authenticate failed:", err);
+    return new Response("Bad Request", { status: 400 });
+  }
+
+  console.log(`Received ${topic} webhook for ${shop}`);
+
+  try {
+    const store = await db.store.findUnique({ where: { shopDomain: shop } });
+    if (!store) return new Response("OK", { status: 200 });
+
+    const orderIds = (payload.orders_to_redact ?? []).map(
+      (id) => `gid://shopify/Order/${id}`,
+    );
+
+    if (orderIds.length > 0) {
+      await db.shipment.updateMany({
+        where: { storeId: store.id, shopifyOrderId: { in: orderIds } },
+        data: {
+          consigneeName: "[redacted]",
+          consigneePhone: "[redacted]",
+          consigneeAddress: "[redacted]",
+        },
+      });
+    }
+  } catch (err) {
+    console.error(`[${topic}] ${shop}:`, err);
+  }
+
+  return new Response("OK", { status: 200 });
+};
+
+===== F:\Nakson projects\leopard-booking\app\routes\gdpr.webhooks.shop_redact.jsx =====
+import { authenticate } from "../shopify.server";
+import db from "../db.server";
+
+export const action = async ({ request }) => {
+  let shop, topic;
+  try {
+    ({ shop, topic } = await authenticate.webhook(request));
+  } catch (err) {
+    if (err instanceof Response) throw err;
+    console.error("[webhook] authenticate failed:", err);
+    return new Response("Bad Request", { status: 400 });
+  }
+
+  console.log(`Received ${topic} webhook for ${shop}`);
+
+  try {
+    await db.$transaction([
+      db.session.deleteMany({ where: { shop } }),
+      db.store.deleteMany({ where: { shopDomain: shop } }),
+    ]);
+  } catch (err) {
+    console.error(`[${topic}] ${shop}:`, err);
+  }
+
+  return new Response("OK", { status: 200 });
+};
+
+===== F:\Nakson projects\leopard-booking\app\routes\healthz.jsx =====
+import db from "../db.server";
+
+const REQUIRED_ENV = [
+  "DATABASE_URL",
+  "ENCRYPTION_KEY",
+  "SHOPIFY_API_KEY",
+  "SHOPIFY_API_SECRET",
+  "SHOPIFY_APP_URL",
+  "SCOPES",
+];
+
+export const loader = async () => {
+  const missingEnv = REQUIRED_ENV.filter((key) => !process.env[key]);
+
+  if (missingEnv.length > 0) {
+    return Response.json(
+      { ok: false, environment: "error", missingEnv },
+      { status: 503 },
+    );
+  }
+
+  try {
+    await db.$queryRaw`SELECT 1`;
+    return Response.json({ ok: true, environment: "ok", database: "ok" });
+  } catch (error) {
+    return Response.json(
+      {
+        ok: false,
+        environment: "ok",
+        database: "error",
+        message: error.message,
+      },
+      { status: 503 },
+    );
+  }
+};
+
+===== F:\Nakson projects\leopard-booking\app\routes\webhooks.app.scopes_update.jsx =====
+import { authenticate } from "../shopify.server";
+import db from "../db.server";
+
+export const action = async ({ request }) => {
+  const { shop, topic, payload, session } = await authenticate.webhook(request);
+
+  console.log(`Received ${topic} webhook for ${shop}`);
+
+  try {
+    if (session) {
+      const current = payload?.current;
+      if (current !== undefined) {
+        await db.session.updateMany({
+          where: { shop, id: session.id },
+          data: { scope: String(current) },
+        });
+      }
+    }
+  } catch (err) {
+    console.error("webhook db error", { topic, shop, error: err?.message });
+  }
+
+  return new Response("OK", { status: 200 });
+};
+
+===== F:\Nakson projects\leopard-booking\app\routes\webhooks.app.uninstalled.jsx =====
+import { authenticate } from "../shopify.server";
+import db from "../db.server";
+import { markStoreUninstalled } from "../services/store.server";
+
+export const action = async ({ request }) => {
+  const { shop, topic } = await authenticate.webhook(request);
+
+  console.log(`Received ${topic} webhook for ${shop}`);
+
+  try {
+    await db.session.deleteMany({ where: { shop } });
+    await markStoreUninstalled(shop);
+  } catch (err) {
+    console.error("webhook db error", { topic, shop, error: err?.message });
+  }
+
+  return new Response("OK", { status: 200 });
+};
+
+===== F:\Nakson projects\leopard-booking\app\routes\webhooks.customers.data_request.jsx =====
+import { authenticate } from "../shopify.server";
+
+export const action = async ({ request }) => {
+  let shop, topic;
+  try {
+    ({ shop, topic } = await authenticate.webhook(request));
+  } catch (err) {
+    if (err instanceof Response) throw err;
+    console.error("[webhook] authenticate failed:", err);
+    return new Response("Bad Request", { status: 400 });
+  }
+
+  console.log(`Received ${topic} webhook for ${shop}`);
+
+  return new Response("OK", { status: 200 });
+};
+
+===== F:\Nakson projects\leopard-booking\app\routes\webhooks.customers.redact.jsx =====
+import { authenticate } from "../shopify.server";
+import db from "../db.server";
+
+export const action = async ({ request }) => {
+  let shop, topic, payload;
+  try {
+    ({ shop, topic, payload } = await authenticate.webhook(request));
+  } catch (err) {
+    if (err instanceof Response) throw err;
+    console.error("[webhook] authenticate failed:", err);
+    return new Response("Bad Request", { status: 400 });
+  }
+
+  console.log(`Received ${topic} webhook for ${shop}`);
+
+  try {
+    const store = await db.store.findUnique({ where: { shopDomain: shop } });
+    if (!store) return new Response("OK", { status: 200 });
+
+    const orderIds = (payload.orders_to_redact ?? []).map(
+      (id) => `gid://shopify/Order/${id}`,
+    );
+
+    if (orderIds.length > 0) {
+      await db.shipment.updateMany({
+        where: { storeId: store.id, shopifyOrderId: { in: orderIds } },
+        data: {
+          consigneeName: "[redacted]",
+          consigneePhone: "[redacted]",
+          consigneeAddress: "[redacted]",
+        },
+      });
+    }
+  } catch (err) {
+    console.error("webhook db error", { topic, shop, error: err?.message });
+  }
+
+  return new Response("OK", { status: 200 });
+};
+
+===== F:\Nakson projects\leopard-booking\app\routes\webhooks.fulfillments.create.jsx =====
+import { authenticate } from "../shopify.server";
+import db from "../db.server";
+
+export const action = async ({ request }) => {
+  const { shop, topic, payload } = await authenticate.webhook(request);
+
+  console.log(`Received ${topic} webhook for ${shop}`);
+
+  try {
+    const store = await db.store.findUnique({ where: { shopDomain: shop } });
+    if (!store) return new Response("OK", { status: 200 });
+
+    const fulfillment = payload;
+    const shopifyOrderId = `gid://shopify/Order/${fulfillment.order_id}`;
+
+    const shipment = await db.shipment.findUnique({
+      where: { storeId_shopifyOrderId: { storeId: store.id, shopifyOrderId } },
+    });
+
+    const advanceable = ["PENDING", "BOOKED"];
+    if (!shipment || !advanceable.includes(shipment.status)) return new Response("OK", { status: 200 });
+
+    const trackingNumbers = fulfillment.tracking_numbers ?? [];
+
+    await db.$transaction([
+      db.shipment.update({
+        where: { id: shipment.id },
+        data: { status: "IN_TRANSIT" },
+      }),
+      db.shipmentLog.create({
+        data: {
+          shipmentId: shipment.id,
+          eventType: "STATUS_CHANGE",
+          fromStatus: shipment.status,
+          toStatus: "IN_TRANSIT",
+          message: `Fulfillment created in Shopify (tracking: ${trackingNumbers.join(", ") || "none"})`,
+        },
+      }),
+    ]);
+  } catch (err) {
+    console.error("webhook db error", { topic, shop, error: err?.message });
+  }
+
+  return new Response("OK", { status: 200 });
+};
+
+===== F:\Nakson projects\leopard-booking\app\routes\webhooks.fulfillments.update.jsx =====
+import { authenticate } from "../shopify.server";
+import db from "../db.server";
+
+const STATUS_MAP = {
+  delivered:          "DELIVERED",
+  in_transit:         "IN_TRANSIT",
+  out_for_delivery:   "IN_TRANSIT",
+  returned_to_sender: "RETURNED",
+  failure:            "EXCEPTION",
+};
+
+export const action = async ({ request }) => {
+  const { shop, topic, payload } = await authenticate.webhook(request);
+
+  console.log(`Received ${topic} webhook for ${shop}`);
+
+  try {
+    const store = await db.store.findUnique({ where: { shopDomain: shop } });
+    if (!store) return new Response("OK", { status: 200 });
+
+    const fulfillment = payload;
+    const shopifyOrderId = `gid://shopify/Order/${fulfillment.order_id}`;
+
+    const shipment = await db.shipment.findUnique({
+      where: { storeId_shopifyOrderId: { storeId: store.id, shopifyOrderId } },
+    });
+
+    if (!shipment) return new Response("OK", { status: 200 });
+
+    const newStatus = STATUS_MAP[fulfillment.shipment_status];
+    if (!newStatus || newStatus === shipment.status) return new Response("OK", { status: 200 });
+
+    await db.$transaction([
+      db.shipment.update({
+        where: { id: shipment.id },
+        data: {
+          status: newStatus,
+          ...(newStatus === "DELIVERED" ? { deliveredAt: new Date() } : {}),
+        },
+      }),
+      db.shipmentLog.create({
+        data: {
+          shipmentId: shipment.id,
+          eventType: "STATUS_CHANGE",
+          fromStatus: shipment.status,
+          toStatus: newStatus,
+          message: `Fulfillment status updated to '${fulfillment.shipment_status}' in Shopify`,
+        },
+      }),
+    ]);
+  } catch (err) {
+    console.error("webhook db error", { topic, shop, error: err?.message });
+  }
+
+  return new Response("OK", { status: 200 });
+};
+
+===== F:\Nakson projects\leopard-booking\app\routes\webhooks.orders.cancelled.jsx =====
+import { authenticate } from "../shopify.server";
+import db from "../db.server";
+import { LeopardApiClient } from "../integrations/leopards/client.server";
+import { getSettings } from "../services/settings.server";
+
+export const action = async ({ request }) => {
+  const { shop, topic, payload } = await authenticate.webhook(request);
+
+  console.log(`Received ${topic} webhook for ${shop}`);
+
+  try {
+    const store = await db.store.findUnique({ where: { shopDomain: shop } });
+    if (!store) return new Response("OK", { status: 200 });
+
+    const shopifyOrderId = `gid://shopify/Order/${payload.id}`;
+
+    const shipment = await db.shipment.findUnique({
+      where: { storeId_shopifyOrderId: { storeId: store.id, shopifyOrderId } },
+    });
+
+    if (!shipment || shipment.status === "CANCELLED" || shipment.status === "DELIVERED") {
+      return new Response("OK", { status: 200 });
+    }
+
+    let cancelMessage = "Order cancelled in Shopify; shipment was not yet booked with Leopards.";
+    const isBooked = shipment.cnNumber && (shipment.status === "BOOKED" || shipment.status === "IN_TRANSIT");
+
+    if (isBooked) {
+      try {
+        const settings = await getSettings(store.id, { decrypt: true });
+        if (settings.leopardApiKey && settings.leopardApiPassword) {
+          const client = new LeopardApiClient({ storeId: store.id, settings });
+          const result = await client.cancelBookedPackets([shipment.cnNumber]);
+          cancelMessage = result.ok
+            ? "Order cancelled in Shopify; Leopards cancel succeeded."
+            : `Order cancelled in Shopify; Leopards cancel failed: ${result.message ?? "unknown"}`;
+        } else {
+          cancelMessage = "Order cancelled in Shopify; Leopards cancel skipped (no credentials).";
+        }
+      } catch (err) {
+        console.error("webhook leopards cancel error", { topic, shop, error: err?.message });
+        cancelMessage = `Order cancelled in Shopify; Leopards cancel errored: ${err?.message ?? "unknown"}`;
+      }
+    }
+
+    await db.$transaction([
+      db.shipment.update({
+        where: { id: shipment.id },
+        data: { status: "CANCELLED", cancelledAt: new Date() },
+      }),
+      db.shipmentLog.create({
+        data: {
+          shipmentId: shipment.id,
+          eventType: "CANCELLED",
+          fromStatus: shipment.status,
+          toStatus: "CANCELLED",
+          message: cancelMessage,
+        },
+      }),
+    ]);
+  } catch (err) {
+    console.error("webhook db error", { topic, shop, error: err?.message });
+  }
+
+  return new Response("OK", { status: 200 });
+};
+
+===== F:\Nakson projects\leopard-booking\app\routes\webhooks.orders.create.jsx =====
+import { authenticate } from "../shopify.server";
+import db from "../db.server";
+import { getCodKeywords } from "../services/settings.server";
+
+export const action = async ({ request }) => {
+  const { shop, topic, payload } = await authenticate.webhook(request);
+
+  console.log(`Received ${topic} webhook for ${shop}`);
+
+  try {
+    const store = await db.store.findUnique({
+      where: { shopDomain: shop },
+      include: { settings: true },
+    });
+    if (!store) return new Response("OK", { status: 200 });
+
+    const order = payload;
+    const shopifyOrderId = `gid://shopify/Order/${order.id}`;
+
+    const codKeywords = getCodKeywords(store.settings);
+    const gatewayText = (order.payment_gateway_names ?? []).join(" ").toLowerCase();
+    const isCod = !gatewayText || codKeywords.some((kw) => kw && gatewayText.includes(kw));
+    const totalAmount = parseFloat(order.current_total_price ?? order.total_price ?? "0");
+    const codAmount = isCod ? Math.round(totalAmount) : 0;
+
+    const addr = order.shipping_address ?? order.billing_address;
+
+    await db.shipment.upsert({
+      where: { storeId_shopifyOrderId: { storeId: store.id, shopifyOrderId } },
+      create: {
+        storeId: store.id,
+        shopifyOrderId,
+        shopifyOrderName: order.name,
+        status: "PENDING",
+        codAmount,
+        weightGrams: store.settings?.defaultWeightGrams ?? 1000,
+        consigneeName: addr?.name ?? "Unknown",
+        consigneePhone: addr?.phone ?? order.phone ?? "",
+        consigneeAddress: [addr?.address1, addr?.address2, addr?.city, addr?.province, addr?.zip]
+          .filter(Boolean)
+          .join(", "),
+      },
+      update: {},
+    });
+  } catch (err) {
+    console.error("webhook db error", { topic, shop, error: err?.message });
+  }
+
+  return new Response("OK", { status: 200 });
+};
+
+===== F:\Nakson projects\leopard-booking\app\routes\webhooks.orders.delete.jsx =====
+import { authenticate } from "../shopify.server";
+import db from "../db.server";
+
+export const action = async ({ request }) => {
+  const { shop, topic, payload } = await authenticate.webhook(request);
+
+  console.log(`Received ${topic} webhook for ${shop}`);
+
+  try {
+    const store = await db.store.findUnique({ where: { shopDomain: shop } });
+    if (!store) return new Response("OK", { status: 200 });
+
+    const shopifyOrderId = `gid://shopify/Order/${payload.id}`;
+
+    const shipment = await db.shipment.findUnique({
+      where: { storeId_shopifyOrderId: { storeId: store.id, shopifyOrderId } },
+    });
+
+    if (!shipment || shipment.status === "CANCELLED" || shipment.status === "DELIVERED") {
+      return new Response("OK", { status: 200 });
+    }
+
+    await db.$transaction([
+      db.shipment.update({
+        where: { id: shipment.id },
+        data: { status: "CANCELLED", cancelledAt: new Date() },
+      }),
+      db.shipmentLog.create({
+        data: {
+          shipmentId: shipment.id,
+          eventType: "CANCELLED",
+          fromStatus: shipment.status,
+          toStatus: "CANCELLED",
+          message: "Order permanently deleted from Shopify",
+        },
+      }),
+    ]);
+  } catch (err) {
+    console.error("webhook db error", { topic, shop, error: err?.message });
+  }
+
+  return new Response("OK", { status: 200 });
+};
+
+===== F:\Nakson projects\leopard-booking\app\routes\webhooks.orders.fulfilled.jsx =====
+import { authenticate } from "../shopify.server";
+import db from "../db.server";
+
+export const action = async ({ request }) => {
+  const { shop, topic, payload } = await authenticate.webhook(request);
+
+  console.log(`Received ${topic} webhook for ${shop}`);
+
+  try {
+    const store = await db.store.findUnique({ where: { shopDomain: shop } });
+    if (!store) return new Response("OK", { status: 200 });
+
+    const shopifyOrderId = `gid://shopify/Order/${payload.id}`;
+
+    const shipment = await db.shipment.findUnique({
+      where: { storeId_shopifyOrderId: { storeId: store.id, shopifyOrderId } },
+    });
+
+    const advanceable = ["PENDING", "BOOKED"];
+    if (!shipment || !advanceable.includes(shipment.status)) return new Response("OK", { status: 200 });
+
+    await db.$transaction([
+      db.shipment.update({
+        where: { id: shipment.id },
+        data: { status: "IN_TRANSIT" },
+      }),
+      db.shipmentLog.create({
+        data: {
+          shipmentId: shipment.id,
+          eventType: "STATUS_CHANGE",
+          fromStatus: shipment.status,
+          toStatus: "IN_TRANSIT",
+          message: "Order marked as fulfilled in Shopify",
+        },
+      }),
+    ]);
+  } catch (err) {
+    console.error("webhook db error", { topic, shop, error: err?.message });
+  }
+
+  return new Response("OK", { status: 200 });
+};
+
+===== F:\Nakson projects\leopard-booking\app\routes\webhooks.orders.paid.jsx =====
+import { authenticate } from "../shopify.server";
+import db from "../db.server";
+import { getCodKeywords } from "../services/settings.server";
+
+export const action = async ({ request }) => {
+  const { shop, topic, payload } = await authenticate.webhook(request);
+
+  console.log(`Received ${topic} webhook for ${shop}`);
+
+  try {
+    const store = await db.store.findUnique({
+      where: { shopDomain: shop },
+      include: { settings: true },
+    });
+    if (!store) return new Response("OK", { status: 200 });
+
+    const order = payload;
+    const shopifyOrderId = `gid://shopify/Order/${order.id}`;
+
+    const shipment = await db.shipment.findUnique({
+      where: { storeId_shopifyOrderId: { storeId: store.id, shopifyOrderId } },
+    });
+
+    if (!shipment || shipment.status !== "PENDING") return new Response("OK", { status: 200 });
+
+    const codKeywords = getCodKeywords(store.settings);
+    const gatewayText = (order.payment_gateway_names ?? []).join(" ").toLowerCase();
+    const isCod = !gatewayText || codKeywords.some((kw) => kw && gatewayText.includes(kw));
+    const totalAmount = parseFloat(order.current_total_price ?? order.total_price ?? "0");
+
+    await db.shipment.update({
+      where: { id: shipment.id },
+      data: { codAmount: isCod ? Math.round(totalAmount) : 0 },
+    });
+  } catch (err) {
+    console.error("webhook db error", { topic, shop, error: err?.message });
+  }
+
+  return new Response("OK", { status: 200 });
+};
+
+===== F:\Nakson projects\leopard-booking\app\routes\webhooks.orders.updated.jsx =====
+import { authenticate } from "../shopify.server";
+import db from "../db.server";
+
+export const action = async ({ request }) => {
+  const { shop, topic, payload } = await authenticate.webhook(request);
+
+  console.log(`Received ${topic} webhook for ${shop}`);
+
+  try {
+    const store = await db.store.findUnique({ where: { shopDomain: shop } });
+    if (!store) return new Response("OK", { status: 200 });
+
+    const order = payload;
+    const shopifyOrderId = `gid://shopify/Order/${order.id}`;
+
+    const shipment = await db.shipment.findUnique({
+      where: { storeId_shopifyOrderId: { storeId: store.id, shopifyOrderId } },
+    });
+
+    if (!shipment || shipment.status !== "PENDING") return new Response("OK", { status: 200 });
+
+    const addr = order.shipping_address;
+    if (!addr) return new Response("OK", { status: 200 });
+
+    const newAddress = [addr.address1, addr.address2, addr.city, addr.province, addr.zip]
+      .filter(Boolean)
+      .join(", ");
+
+    await db.shipment.update({
+      where: { id: shipment.id },
+      data: {
+        consigneeName: addr.name ?? shipment.consigneeName,
+        consigneePhone: addr.phone ?? order.phone ?? shipment.consigneePhone,
+        consigneeAddress: newAddress || shipment.consigneeAddress,
+      },
+    });
+  } catch (err) {
+    console.error("webhook db error", { topic, shop, error: err?.message });
+  }
+
+  return new Response("OK", { status: 200 });
+};
+
+===== F:\Nakson projects\leopard-booking\app\routes\webhooks.shop.redact.jsx =====
+import { authenticate } from "../shopify.server";
+import db from "../db.server";
+
+export const action = async ({ request }) => {
+  let shop, topic;
+  try {
+    ({ shop, topic } = await authenticate.webhook(request));
+  } catch (err) {
+    if (err instanceof Response) throw err;
+    console.error("[webhook] authenticate failed:", err);
+    return new Response("Bad Request", { status: 400 });
+  }
+
+  console.log(`Received ${topic} webhook for ${shop}`);
+
+  try {
+    await db.$transaction([
+      db.session.deleteMany({ where: { shop } }),
+      db.store.deleteMany({ where: { shopDomain: shop } }),
+    ]);
+  } catch (err) {
+    console.error("webhook db error", { topic, shop, error: err?.message });
+  }
+
+  return new Response("OK", { status: 200 });
+};
+

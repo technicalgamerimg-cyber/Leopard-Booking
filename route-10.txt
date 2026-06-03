@@ -1,19 +1,27 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import {
-  useFetcher, useLoaderData, useNavigate, useRouteError,
+  useFetcher,
+  useLoaderData,
+  useNavigate,
+  useRouteError,
 } from "react-router";
 import { useAppBridge } from "@shopify/app-bridge-react";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
 import { ensureStore } from "../services/store.server";
-import { cancelShipments, getShipmentById, refreshShipmentStatuses } from "../services/shipment.server";
+import {
+  cancelShipments,
+  getShipmentById,
+  refreshShipmentStatuses,
+} from "../services/shipment.server";
 import { resolveCityName } from "../services/city.server";
+import { getSettings } from "../services/settings.server";
+import { LeopardApiClient } from "../integrations/leopards/client.server";
 
 const TERMINAL_STATUSES = ["DELIVERED", "CANCELLED", "RETURNED"];
 
 const STATUS_STYLES = {
   PENDING:    { dot: "#e8912d", bg: "#fff5ea", text: "#8a4b00",  label: "Not booked" },
-  FAILED:     { dot: "#d72c0d", bg: "#fce8e7", text: "#7f0007",  label: "Booking failed" },
   BOOKED:     { dot: "#2c6ecb", bg: "#eaf4fb", text: "#0d3880",  label: "Booked" },
   IN_TRANSIT: { dot: "#5c6ac4", bg: "#f0f0ff", text: "#3d3d8f",  label: "In transit" },
   DELIVERED:  { dot: "#3d8b40", bg: "#e3f1df", text: "#1e542a",  label: "Delivered" },
@@ -29,19 +37,46 @@ const EVENT_LABELS = {
   ERROR:         "Error",
 };
 
-// ── Loader / Action (NO Leopards API call — page loads instantly) ─────────────
-
 export const loader = async ({ request, params }) => {
   const { session } = await authenticate.admin(request);
-  const store    = await ensureStore(session);
+  const store = await ensureStore(session);
   const shipment = await getShipmentById(store.id, params.id);
 
   if (!shipment) throw new Response("Shipment not found", { status: 404 });
 
   const [originCityName, destinationCityName] = await Promise.all([
-    shipment.originCityId      ? resolveCityName(store.id, shipment.originCityId)      : null,
+    shipment.originCityId ? resolveCityName(store.id, shipment.originCityId) : null,
     shipment.destinationCityId ? resolveCityName(store.id, shipment.destinationCityId) : null,
   ]);
+
+  let trackingEvents = [];
+  if (shipment.cnNumber) {
+    try {
+      const settings = await getSettings(store.id, { decrypt: true });
+      if (settings.leopardApiKey && settings.leopardApiPassword) {
+        const client = new LeopardApiClient({ storeId: store.id, settings });
+        const trackResult = await client.trackBookedPacket([shipment.cnNumber]);
+        if (trackResult.ok) {
+          const packets = trackResult.data?.packet_list ?? trackResult.raw?.packet_list ?? [];
+          const packet = Array.isArray(packets)
+            ? packets.find((p) => String(p.track_number ?? p.cn_number ?? "") === String(shipment.cnNumber))
+            : null;
+          const detail = packet?.["Tracking Detail"] ?? packet?.tracking_detail ?? packet?.trackingDetail ?? [];
+          if (Array.isArray(detail)) {
+            trackingEvents = detail.map((event, idx) => ({
+              id: `${idx}`,
+              status:       event.Status ?? event.status ?? "",
+              activityDate: event.Activity_datetime ?? event.activity_datetime ?? event.Activity_Date ?? event.activity_date ?? event["Activity Date"] ?? "",
+              reason:       event.Reason ?? event.reason ?? "",
+              receiverName: event.Reciever_Name ?? event.Receiver_Name ?? event["Reciever Name"] ?? event["Receiver Name"] ?? event.receiver_name ?? "",
+            }));
+          }
+        }
+      }
+    } catch (err) {
+      console.error("[shipment detail] tracking fetch failed:", err);
+    }
+  }
 
   return {
     shipment: {
@@ -55,19 +90,20 @@ export const loader = async ({ request, params }) => {
       destinationCityName,
       logs: shipment.logs.map((log) => ({ ...log, createdAt: log.createdAt.toISOString() })),
     },
+    trackingEvents,
   };
 };
 
 export const action = async ({ request, params }) => {
   const { session } = await authenticate.admin(request);
-  const store    = await ensureStore(session);
+  const store = await ensureStore(session);
   const shipment = await getShipmentById(store.id, params.id);
 
   if (!shipment) return { ok: false, message: "Shipment not found." };
 
   const formData = await request.formData();
-  const intent   = formData.get("intent");
-  const cn       = shipment.cnNumber;
+  const intent = formData.get("intent");
+  const cn = shipment.cnNumber;
 
   if (!cn) return { ok: false, message: "Shipment has no CN number." };
   if (intent === "refresh") return refreshShipmentStatuses(store.id, [cn]);
@@ -79,14 +115,17 @@ export const action = async ({ request, params }) => {
 // ── Helper components ─────────────────────────────────────────────────────────
 
 function StatusPill({ status }) {
-  const hasFailed = false; // detail page shows raw status only
-  const s = STATUS_STYLES[status] ?? { dot: "#8c9196", bg: "#f6f6f7", text: "#444750", label: status };
+  const s = STATUS_STYLES[status] || { dot: "#8c9196", bg: "#f6f6f7", text: "#444750", label: status };
   return (
     <span style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "4px 10px", borderRadius: 14, background: s.bg, color: s.text, fontSize: 13, fontWeight: 700 }}>
       <span style={{ width: 8, height: 8, borderRadius: "50%", background: s.dot, flexShrink: 0 }} />
       {s.label}
     </span>
   );
+}
+
+function DetailGrid({ children }) {
+  return <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "10px 24px" }}>{children}</div>;
 }
 
 function DetailRow({ label, value, mono }) {
@@ -109,81 +148,32 @@ function EventLogBadge({ type }) {
   };
   const s = styles[type] || { bg: "#f6f6f7", text: "#444750" };
   return (
-    <span style={{ fontSize: 11, padding: "2px 7px", borderRadius: 10, background: s.bg, color: s.text, fontWeight: 600, flexShrink: 0 }}>
+    <span style={{ fontSize: 11, padding: "2px 7px", borderRadius: 10, background: s.bg, color: s.text, fontWeight: 600 }}>
       {EVENT_LABELS[type] ?? type}
     </span>
   );
 }
 
-// Skeleton element shown while tracking loads asynchronously
-function TrackingSkeleton() {
-  return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 12, padding: "16px 0" }}>
-      {[1, 2, 3].map((n) => (
-        <div key={n} style={{ display: "flex", gap: 14, padding: "16px 0", borderBottom: n < 3 ? "1px solid #f1f2f4" : "none" }}>
-          <div style={{ width: 12, height: 12, borderRadius: "50%", background: "#e1e3e5", flexShrink: 0, marginTop: 3 }} />
-          <div style={{ flex: 1 }}>
-            <div style={{ height: 14, background: "#e1e3e5", borderRadius: 4, width: `${40 + n * 15}%`, marginBottom: 6 }} />
-            <div style={{ height: 11, background: "#f1f2f4", borderRadius: 4, width: "30%" }} />
-          </div>
-        </div>
-      ))}
-    </div>
-  );
-}
-
-// ── Page ──────────────────────────────────────────────────────────────────────
+// ── Page ─────────────────────────────────────────────────────────────────────
 
 export default function ShipmentDetail() {
-  const { shipment } = useLoaderData();
-  const fetcher      = useFetcher();
-  const navigate     = useNavigate();
-  const shopify      = useAppBridge();
-  const prevFetcherData = useRef(null);
-
+  const { shipment, trackingEvents } = useLoaderData();
+  const fetcher = useFetcher();
+  const navigate = useNavigate();
+  const shopify = useAppBridge();
   const [confirmCancel, setConfirmCancel] = useState(false);
-
-  // ── Async tracking load — page renders immediately, tracking loads in background
-  const [trackingEvents,  setTrackingEvents]  = useState(null); // null = loading, [] = empty
-  const [trackingError,   setTrackingError]   = useState(null);
+  const busy = fetcher.state !== "idle";
 
   useEffect(() => {
-    if (!shipment.cnNumber) { setTrackingEvents([]); return; }
-    fetch(`/api/tracking/${shipment.id}`)
-      .then((r) => r.json())
-      .then((data) => {
-        setTrackingEvents(data.events ?? []);
-        if (data.error) setTrackingError(data.error);
-      })
-      .catch((err) => {
-        setTrackingEvents([]);
-        setTrackingError(err.message);
-      });
-  }, [shipment.cnNumber, shipment.id]);
-
-  useEffect(() => {
-    if (!fetcher.data || fetcher.data === prevFetcherData.current) return;
-    prevFetcherData.current = fetcher.data;
     if (fetcher.data?.message) {
       shopify.toast.show(fetcher.data.message, { isError: !fetcher.data.ok });
     }
     if (fetcher.data?.ok && fetcher.formData?.get("intent") === "cancel") {
       navigate("/app/shipments");
     }
-    // After a refresh, re-fetch tracking
-    if (fetcher.data?.ok && fetcher.formData?.get("intent") === "refresh" && shipment.cnNumber) {
-      setTrackingEvents(null);
-      setTrackingError(null);
-      fetch(`/api/tracking/${shipment.id}`)
-        .then((r) => r.json())
-        .then((data) => { setTrackingEvents(data.events ?? []); })
-        .catch(() => setTrackingEvents([]));
-    }
-  }, [fetcher.data, fetcher.formData, shipment, shopify, navigate]);
+  }, [fetcher.data, fetcher.formData, shopify, navigate]);
 
-  const busy       = fetcher.state !== "idle";
   const isTerminal = TERMINAL_STATUSES.includes(shipment.status);
-  const hasFailed  = Boolean(shipment.lastError) && shipment.status === "PENDING";
 
   return (
     <s-page heading={shipment.shopifyOrderName}>
@@ -191,8 +181,8 @@ export default function ShipmentDetail() {
       {/* ── Action bar ── */}
       <s-section>
         <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-          <StatusPill status={hasFailed ? "FAILED" : shipment.status} />
-          {shipment.leopardStatusRaw && !hasFailed && (
+          <StatusPill status={shipment.status} />
+          {shipment.leopardStatusRaw && (
             <span style={{ fontSize: 12, color: "#6d7175" }}>Leopards: {shipment.leopardStatusRaw}</span>
           )}
           <div style={{ flex: 1 }} />
@@ -219,9 +209,8 @@ export default function ShipmentDetail() {
       {/* ── Error banner ── */}
       {shipment.lastError && (
         <s-section>
-          <div style={{ background: "#fce8e7", border: "1px solid #d72c0d", borderRadius: 8, padding: "12px 16px" }}>
-            <div style={{ fontSize: 13, fontWeight: 700, color: "#7f0007", marginBottom: 4 }}>Last booking error</div>
-            <div style={{ fontSize: 13, color: "#7f0007", wordBreak: "break-word" }}>{shipment.lastError}</div>
+          <div style={{ background: "#fce8e7", border: "1px solid #d72c0d", borderRadius: 8, padding: "12px 16px", fontSize: 13, color: "#7f0007" }}>
+            <strong>Last error:</strong> {shipment.lastError}
           </div>
         </s-section>
       )}
@@ -239,11 +228,7 @@ export default function ShipmentDetail() {
             <div style={{ display: "flex", gap: 8 }}>
               <fetcher.Form method="post" style={{ display: "contents" }}>
                 <input type="hidden" name="intent" value="cancel" />
-                <s-button
-                  type="submit" tone="critical" disabled={busy}
-                  loading={busy && fetcher.formData?.get("intent") === "cancel"}
-                  onClick={() => setTimeout(() => setConfirmCancel(false), 0)}
-                >
+                <s-button type="submit" tone="critical" disabled={busy} loading={busy && fetcher.formData?.get("intent") === "cancel"} onClick={() => setTimeout(() => setConfirmCancel(false), 0)}>
                   Yes, cancel
                 </s-button>
               </fetcher.Form>
@@ -253,22 +238,23 @@ export default function ShipmentDetail() {
         </s-section>
       )}
 
-      {/* ── Details + Tracking side by side ── */}
+      {/* ── Two-column layout: details + tracking ── */}
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(300px, 1fr))", gap: 0 }}>
 
+        {/* Shipment details card */}
         <s-section heading="Shipment details">
           <div style={{ background: "#fff", border: "1px solid #e1e3e5", borderRadius: 8, padding: "20px" }}>
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "16px 24px" }}>
-              <DetailRow label="Order"       value={shipment.shopifyOrderName} />
-              <DetailRow label="CN Number"   value={shipment.cnNumber} mono />
-              <DetailRow label="Consignee"   value={shipment.consigneeName} />
-              <DetailRow label="Phone"       value={shipment.consigneePhone} />
-              <DetailRow label="COD"         value={shipment.codAmount > 0 ? `${shipment.codAmount.toLocaleString()} PKR` : "Prepaid"} />
-              <DetailRow label="Weight"      value={`${shipment.weightGrams} g`} />
-              <DetailRow label="Pieces"      value={shipment.noOfPieces} />
-              <DetailRow label="Origin"      value={shipment.originCityName ?? shipment.originCityId ?? "—"} />
+              <DetailRow label="Order" value={shipment.shopifyOrderName} />
+              <DetailRow label="CN Number" value={shipment.cnNumber} mono />
+              <DetailRow label="Consignee" value={shipment.consigneeName} />
+              <DetailRow label="Phone" value={shipment.consigneePhone} />
+              <DetailRow label="COD" value={shipment.codAmount > 0 ? `${shipment.codAmount.toLocaleString()} PKR` : "Prepaid"} />
+              <DetailRow label="Weight" value={`${shipment.weightGrams} g`} />
+              <DetailRow label="Pieces" value={shipment.noOfPieces} />
+              <DetailRow label="Origin" value={shipment.originCityName ?? shipment.originCityId ?? "—"} />
               <DetailRow label="Destination" value={shipment.destinationCityName ?? shipment.destinationCityId ?? "—"} />
-              {shipment.bookedAt    && <DetailRow label="Booked"    value={new Date(shipment.bookedAt).toLocaleString()} />}
+              {shipment.bookedAt && <DetailRow label="Booked" value={new Date(shipment.bookedAt).toLocaleString()} />}
               {shipment.deliveredAt && <DetailRow label="Delivered" value={new Date(shipment.deliveredAt).toLocaleString()} />}
               {shipment.cancelledAt && <DetailRow label="Cancelled" value={new Date(shipment.cancelledAt).toLocaleString()} />}
             </div>
@@ -281,51 +267,40 @@ export default function ShipmentDetail() {
           </div>
         </s-section>
 
-        {/* ── Tracking timeline — loads async, never blocks page render ── */}
+        {/* Tracking timeline */}
         <s-section heading="Tracking timeline">
-          {!shipment.cnNumber ? (
-            <div style={{ background: "#f6f6f7", border: "1px solid #e1e3e5", borderRadius: 8, padding: "32px 20px", textAlign: "center" }}>
-              <div style={{ fontSize: 28, marginBottom: 8 }}>📍</div>
-              <div style={{ fontWeight: 600, fontSize: 14, color: "#202223" }}>No CN number yet</div>
-              <div style={{ fontSize: 13, color: "#6d7175", marginTop: 4 }}>Book the shipment to get a tracking number.</div>
-            </div>
-          ) : trackingEvents === null ? (
-            // Loading skeleton — shown while async fetch is in progress
-            <div style={{ background: "#fff", border: "1px solid #e1e3e5", borderRadius: 8, padding: "0 20px" }}>
-              <TrackingSkeleton />
-            </div>
-          ) : trackingEvents.length === 0 ? (
+          {trackingEvents.length === 0 ? (
             <div style={{ background: "#f6f6f7", border: "1px solid #e1e3e5", borderRadius: 8, padding: "32px 20px", textAlign: "center" }}>
               <div style={{ fontSize: 28, marginBottom: 8 }}>📍</div>
               <div style={{ fontWeight: 600, fontSize: 14, color: "#202223", marginBottom: 4 }}>No tracking events yet</div>
-              {trackingError ? (
-                <div style={{ fontSize: 12, color: "#d72c0d", marginTop: 4 }}>{trackingError}</div>
-              ) : (
-                <div style={{ fontSize: 13, color: "#6d7175" }}>Events will appear once the shipment is picked up.</div>
-              )}
-              <div style={{ marginTop: 12 }}>
-                <fetcher.Form method="post">
+              <div style={{ fontSize: 13, color: "#6d7175" }}>
+                {shipment.cnNumber ? "Tracking events will appear here once the shipment is picked up." : "This shipment has no CN number yet."}
+              </div>
+              {shipment.cnNumber && (
+                <fetcher.Form method="post" style={{ marginTop: 12 }}>
                   <input type="hidden" name="intent" value="refresh" />
                   <s-button type="submit" disabled={busy} loading={busy}>Refresh tracking</s-button>
                 </fetcher.Form>
-              </div>
+              )}
             </div>
           ) : (
-            <div style={{ background: "#fff", border: "1px solid #e1e3e5", borderRadius: 8, padding: "0 20px" }}>
+            <div style={{ background: "#fff", border: "1px solid #e1e3e5", borderRadius: 8, padding: "0 20px", position: "relative" }}>
               {trackingEvents.map((event, i) => {
                 const isFirst = i === 0;
                 const isLast  = i === trackingEvents.length - 1;
                 return (
-                  <div key={event.id} style={{ display: "flex", gap: 14, padding: "16px 0", borderBottom: !isLast ? "1px solid #f1f2f4" : "none" }}>
+                  <div key={event.id} style={{ display: "flex", gap: 14, padding: "16px 0", borderBottom: !isLast ? "1px solid #f1f2f4" : "none", position: "relative" }}>
+                    {/* Timeline dot */}
                     <div style={{ display: "flex", flexDirection: "column", alignItems: "center", flexShrink: 0, width: 16 }}>
                       <div style={{
-                        width: 12, height: 12, borderRadius: "50%",
+                        width: 12, height: 12, borderRadius: "50%", flexShrink: 0,
                         background: isFirst ? "#3d8b40" : "#c4cdd5",
-                        border: `2px solid ${isFirst ? "#3d8b40" : "#c4cdd5"}`,
+                        border: isFirst ? "2px solid #3d8b40" : "2px solid #c4cdd5",
                         boxShadow: isFirst ? "0 0 0 3px #e3f1df" : "none",
                         marginTop: 3,
                       }} />
                     </div>
+                    {/* Content */}
                     <div style={{ flex: 1, minWidth: 0 }}>
                       <div style={{ fontWeight: isFirst ? 700 : 600, fontSize: 13, color: isFirst ? "#1e542a" : "#202223" }}>
                         {event.status}
@@ -348,7 +323,7 @@ export default function ShipmentDetail() {
         </s-section>
       </div>
 
-      {/* ── Activity log ── */}
+      {/* ── App event log ── */}
       <s-section heading="Activity log">
         {shipment.logs.length === 0 ? (
           <div style={{ background: "#f6f6f7", border: "1px solid #e1e3e5", borderRadius: 8, padding: "20px", textAlign: "center", fontSize: 13, color: "#6d7175" }}>

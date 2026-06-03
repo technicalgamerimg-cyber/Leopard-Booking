@@ -1,4 +1,5 @@
 import db from "../../db.server";
+import { leopardBreaker } from "../../lib/circuit-breaker.server";
 
 const JSON_ENDPOINT_TIMEOUT = Number(process.env.LEOPARDS_REQUEST_TIMEOUT_MS ?? 15000);
 const PDF_ENDPOINT_TIMEOUT = Number(process.env.LEOPARDS_PDF_TIMEOUT_MS ?? 30000);
@@ -130,6 +131,13 @@ export class LeopardApiClient {
   }
 
   async request(endpoint, payload = {}, options = {}) {
+    // Fast-fail if the circuit is open (repeated 5xx / timeouts)
+    if (leopardBreaker.isOpen()) {
+      const result = leopardBreaker.openResult();
+      await this.logCall(endpoint, result, 0, 0);
+      return result;
+    }
+
     const startedAt = Date.now();
     const timeoutMs = options.pdf ? PDF_ENDPOINT_TIMEOUT : JSON_ENDPOINT_TIMEOUT;
     let httpStatus = null;
@@ -167,6 +175,7 @@ export class LeopardApiClient {
         httpStatus = response.status;
 
         if (response.status >= 500 && attempt < MAX_RETRIES - 1) {
+          leopardBreaker.recordFailure();
           await new Promise((resolve) =>
             setTimeout(resolve, 1000 * 2 ** attempt),
           );
@@ -187,6 +196,8 @@ export class LeopardApiClient {
         const text = await response.text();
         const json = text ? JSON.parse(text) : {};
         result = normalizeJson(endpoint, json, httpStatus);
+        // HTTP 2xx/4xx = infrastructure is alive; reset breaker
+        if (httpStatus < 500) leopardBreaker.recordSuccess();
         break;
       } catch (error) {
         if (attempt < MAX_RETRIES - 1 && error.name !== "AbortError") continue;
@@ -200,6 +211,8 @@ export class LeopardApiClient {
           httpStatus,
           leopardStatus: null,
         };
+        // Network error / timeout = infrastructure failure → trip breaker
+        leopardBreaker.recordFailure();
         break;
       } finally {
         clearTimeout(timeoutId);

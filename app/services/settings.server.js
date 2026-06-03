@@ -5,6 +5,30 @@ import { LeopardApiClient } from "../integrations/leopards/client.server";
 
 const DEFAULT_COD_KEYWORDS = "cod,cash on delivery";
 
+// ── In-process settings cache (30s TTL) ──────────────────────────────────────
+// Eliminates repeated DB round-trips for high-frequency webhook handlers and batch routes.
+// Cache stores the RAW (encrypted) settings — decryption still happens per-request when needed.
+
+const _cache = new Map(); // storeId → { raw: Settings, cachedAt: number }
+const CACHE_TTL_MS = 30_000;
+
+function _cachePut(storeId, raw) {
+  _cache.set(storeId, { raw, cachedAt: Date.now() });
+}
+
+function _cacheGet(storeId) {
+  const entry = _cache.get(storeId);
+  if (!entry) return null;
+  if (Date.now() - entry.cachedAt > CACHE_TTL_MS) { _cache.delete(storeId); return null; }
+  return entry.raw;
+}
+
+export function invalidateSettingsCache(storeId) {
+  _cache.delete(storeId);
+}
+
+// ── Internal helpers ──────────────────────────────────────────────────────────
+
 function safeDecrypt(value) {
   if (!value) return null;
   try {
@@ -18,59 +42,62 @@ function safeDecrypt(value) {
 function shapeSettings(settings) {
   return {
     ...settings,
-    leopardApiKeyMasked: maskSecret(settings.leopardApiKey),
+    leopardApiKeyMasked:      maskSecret(settings.leopardApiKey),
     leopardApiPasswordMasked: maskSecret(settings.leopardApiPassword),
-    hasCredentials: Boolean(
-      settings.leopardApiKey && settings.leopardApiPassword,
-    ),
-    codGatewayKeywords: settings.codGatewayKeywords ?? DEFAULT_COD_KEYWORDS,
+    hasCredentials:           Boolean(settings.leopardApiKey && settings.leopardApiPassword),
+    codGatewayKeywords:       settings.codGatewayKeywords ?? DEFAULT_COD_KEYWORDS,
   };
 }
 
+// ── Public API ────────────────────────────────────────────────────────────────
+
 export async function getSettings(storeId, { decrypt = false } = {}) {
-  let settings = await db.settings.findUnique({ where: { storeId } });
-  if (!settings) {
-    settings = await db.settings.create({
-      data: {
-        storeId,
-        defaultShipmentId: Number(process.env.LEOPARDS_DEFAULT_SHIPMENT_ID ?? 1),
-        defaultWeightGrams: Number(process.env.DEFAULT_PACKET_WEIGHT_GRAMS ?? 1000),
-        leopardEnvironment:
-          process.env.LEOPARDS_DEFAULT_ENVIRONMENT === "production"
-            ? "production"
-            : "staging",
-      },
-    });
+  let raw = _cacheGet(storeId);
+
+  if (!raw) {
+    raw = await db.settings.findUnique({ where: { storeId } });
+
+    if (!raw) {
+      raw = await db.settings.upsert({
+        where:  { storeId },
+        create: {
+          storeId,
+          defaultShipmentId:  Number(process.env.LEOPARDS_DEFAULT_SHIPMENT_ID ?? 1),
+          defaultWeightGrams: Number(process.env.DEFAULT_PACKET_WEIGHT_GRAMS ?? 1000),
+          leopardEnvironment:
+            process.env.LEOPARDS_DEFAULT_ENVIRONMENT === "production"
+              ? "production"
+              : "staging",
+        },
+        update: {},
+      });
+    }
+
+    _cachePut(storeId, raw);
   }
 
-  if (!decrypt) {
-    return shapeSettings(settings);
-  }
+  if (!decrypt) return shapeSettings(raw);
 
   return {
-    ...settings,
-    leopardApiKey: safeDecrypt(settings.leopardApiKey),
-    leopardApiPassword: safeDecrypt(settings.leopardApiPassword),
-    codGatewayKeywords: settings.codGatewayKeywords ?? DEFAULT_COD_KEYWORDS,
+    ...raw,
+    leopardApiKey:      safeDecrypt(raw.leopardApiKey),
+    leopardApiPassword: safeDecrypt(raw.leopardApiPassword),
+    codGatewayKeywords: raw.codGatewayKeywords ?? DEFAULT_COD_KEYWORDS,
   };
 }
 
 export function getCodKeywords(settings) {
   const raw = settings?.codGatewayKeywords ?? DEFAULT_COD_KEYWORDS;
-  return raw
-    .split(",")
-    .map((keyword) => keyword.trim().toLowerCase())
-    .filter(Boolean);
+  return raw.split(",").map((k) => k.trim().toLowerCase()).filter(Boolean);
 }
 
 export async function saveSettings(storeId, formData) {
   const current = await getSettings(storeId);
-  const apiKey = normalizeString(formData.get("apiKey"));
+  const apiKey      = normalizeString(formData.get("apiKey"));
   const apiPassword = normalizeString(formData.get("apiPassword"));
+
   const environment = formData.has("environment")
-    ? formData.get("environment") === "production"
-      ? "production"
-      : "staging"
+    ? formData.get("environment") === "production" ? "production" : "staging"
     : current.leopardEnvironment;
 
   const data = {
@@ -91,16 +118,10 @@ export async function saveSettings(storeId, formData) {
       ? normalizeString(formData.get("shipperAddress")) || null
       : current.shipperAddress,
     defaultShipmentId: formData.has("defaultShipmentId")
-      ? parsePositiveInt(
-          formData.get("defaultShipmentId"),
-          current.defaultShipmentId ?? 1,
-        )
+      ? parsePositiveInt(formData.get("defaultShipmentId"), current.defaultShipmentId ?? 1)
       : current.defaultShipmentId,
     defaultWeightGrams: formData.has("defaultWeightGrams")
-      ? parsePositiveInt(
-          formData.get("defaultWeightGrams"),
-          current.defaultWeightGrams,
-        )
+      ? parsePositiveInt(formData.get("defaultWeightGrams"), current.defaultWeightGrams)
       : current.defaultWeightGrams,
     defaultSpecialInstructions: formData.has("defaultSpecialInstructions")
       ? normalizeString(formData.get("defaultSpecialInstructions")) || null
@@ -113,39 +134,36 @@ export async function saveSettings(storeId, formData) {
       : current.codGatewayKeywords,
   };
 
-  if (apiKey) data.leopardApiKey = encryptSecret(apiKey);
+  if (apiKey)      data.leopardApiKey      = encryptSecret(apiKey);
   if (apiPassword) data.leopardApiPassword = encryptSecret(apiPassword);
 
   await db.settings.update({ where: { storeId }, data });
+  invalidateSettingsCache(storeId);
 
   return {
     ok: true,
-    message:
-      current.hasCredentials || apiKey || apiPassword
-        ? "Settings saved."
-        : "Settings saved. Add Leopards credentials before booking shipments.",
+    message: current.hasCredentials || apiKey || apiPassword
+      ? "Settings saved."
+      : "Settings saved. Add Leopards credentials before booking shipments.",
   };
 }
 
 export async function clearCredentials(storeId) {
   await db.settings.update({
     where: { storeId },
-    data: { leopardApiKey: null, leopardApiPassword: null },
+    data:  { leopardApiKey: null, leopardApiPassword: null },
   });
-
+  invalidateSettingsCache(storeId);
   return { ok: true, message: "Leopards credentials cleared." };
 }
 
 export async function testConnection(storeId) {
   const settings = await getSettings(storeId, { decrypt: true });
-
   if (!settings.leopardApiKey || !settings.leopardApiPassword) {
     return { ok: false, message: "Enter and save Leopards credentials first." };
   }
-
   const client = new LeopardApiClient({ storeId, settings });
   const result = await client.getAllCities();
-
   if (!result.ok) return result;
   return { ok: true, message: "Leopards API connection successful." };
 }

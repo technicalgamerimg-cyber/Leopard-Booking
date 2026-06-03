@@ -2,33 +2,26 @@ import db from "../db.server";
 import { LeopardApiClient } from "../integrations/leopards/client.server";
 import { mapLeopardStatus } from "../integrations/leopards/status-map.server";
 import { getSettings } from "./settings.server";
+import {
+  isTerminal,
+  safeTransition,
+  cancellableStatuses,
+  TERMINAL_STATUSES,
+} from "../lib/shipment-state-machine.server";
 
-const TERMINAL_STATUSES = ["DELIVERED", "CANCELLED", "RETURNED"];
+// ── Listing / export ─────────────────────────────────────────────────────────
 
 export async function listShipments(storeId, status = "", query = "", page = 1, perPage = 50) {
-  const where = {
-    storeId,
-    ...(status ? { status } : {}),
-    ...(query
-      ? {
-          OR: [
-            { cnNumber: { contains: query, mode: "insensitive" } },
-            { shopifyOrderName: { contains: query, mode: "insensitive" } },
-            { consigneeName: { contains: query, mode: "insensitive" } },
-          ],
-        }
-      : {}),
-  };
-
-  const safePage = Math.max(1, Number(page) || 1);
+  const where = buildWhere(storeId, status, query);
+  const safePage    = Math.max(1, Number(page) || 1);
   const safePerPage = Math.max(1, Math.min(200, Number(perPage) || 50));
 
   const [shipments, total] = await Promise.all([
     db.shipment.findMany({
       where,
       orderBy: { updatedAt: "desc" },
-      skip: (safePage - 1) * safePerPage,
-      take: safePerPage,
+      skip:    (safePage - 1) * safePerPage,
+      take:    safePerPage,
     }),
     db.shipment.count({ where }),
   ]);
@@ -36,31 +29,18 @@ export async function listShipments(storeId, status = "", query = "", page = 1, 
   return {
     shipments,
     total,
-    page: safePage,
-    perPage: safePerPage,
+    page:      safePage,
+    perPage:   safePerPage,
     pageCount: Math.max(1, Math.ceil(total / safePerPage)),
   };
 }
 
 export async function listShipmentsForExport(storeId, status = "", query = "") {
-  const where = {
-    storeId,
-    ...(status ? { status } : {}),
-    ...(query
-      ? {
-          OR: [
-            { cnNumber: { contains: query, mode: "insensitive" } },
-            { shopifyOrderName: { contains: query, mode: "insensitive" } },
-            { consigneeName: { contains: query, mode: "insensitive" } },
-          ],
-        }
-      : {}),
-  };
-  return db.shipment.findMany({
-    where,
-    orderBy: { updatedAt: "desc" },
-    take: 5000,
-  });
+  const [shipments, total] = await Promise.all([
+    db.shipment.findMany({ where: buildWhere(storeId, status, query), orderBy: { updatedAt: "desc" }, take: 5000 }),
+    db.shipment.count({ where: buildWhere(storeId, status, query) }),
+  ]);
+  return { shipments, total };
 }
 
 export async function listEligibleShipmentsForLoadsheet(storeId) {
@@ -68,16 +48,23 @@ export async function listEligibleShipmentsForLoadsheet(storeId) {
     where: {
       storeId,
       cnNumber: { not: null },
-      status: { notIn: ["CANCELLED", "DELIVERED", "RETURNED"] },
+      status:   { notIn: ["CANCELLED", "DELIVERED", "RETURNED"] },
     },
-    select: { id: true, cnNumber: true, shopifyOrderName: true, status: true },
+    select:  { id: true, cnNumber: true, shopifyOrderName: true, status: true },
     orderBy: { bookedAt: "desc" },
-    take: 1000,
+    take:    1000,
+  });
+}
+
+export async function getShipmentById(storeId, shipmentId) {
+  return db.shipment.findFirst({
+    where:   { id: shipmentId, storeId },
+    include: { logs: { orderBy: { createdAt: "desc" } } },
   });
 }
 
 export async function purgeOldLogs({ apiLogDays = 30, webhookLogDays = 30 } = {}) {
-  const apiCutoff = new Date(Date.now() - apiLogDays * 86_400_000);
+  const apiCutoff     = new Date(Date.now() - apiLogDays * 86_400_000);
   const webhookCutoff = new Date(Date.now() - webhookLogDays * 86_400_000);
   const [{ count: apiDeleted }, { count: webhookDeleted }] = await Promise.all([
     db.apiLog.deleteMany({ where: { createdAt: { lt: apiCutoff } } }),
@@ -86,55 +73,35 @@ export async function purgeOldLogs({ apiLogDays = 30, webhookLogDays = 30 } = {}
   return { apiDeleted, webhookDeleted };
 }
 
-export async function getShipmentById(storeId, shipmentId) {
-  return db.shipment.findFirst({
-    where: { id: shipmentId, storeId },
-    include: {
-      logs: { orderBy: { createdAt: "desc" } },
-    },
-  });
-}
-
-function parsePerCnErrors(raw) {
-  // Leopards may return: { status: 0, error: { "CN1": "msg", "CN2": "msg" } }
-  // or sometimes nested under raw.error / raw.data.
-  const errSource = raw?.error ?? raw?.data?.error;
-  if (!errSource || typeof errSource !== "object") return {};
-  const out = {};
-  for (const [key, value] of Object.entries(errSource)) {
-    out[String(key)] = typeof value === "string" ? value : JSON.stringify(value);
-  }
-  return out;
-}
+// ── Cancellation ─────────────────────────────────────────────────────────────
 
 export async function cancelShipments(storeId, cnNumbers) {
+  if (!cnNumbers?.length) {
+    return { ok: false, message: "No CN numbers provided." };
+  }
+
+  // Only allow cancellation from states the state machine permits
+  const cancellable = cancellableStatuses();
   const shipments = await db.shipment.findMany({
     where: {
       storeId,
       cnNumber: { in: cnNumbers },
-      status: { notIn: TERMINAL_STATUSES },
+      status:   { in: cancellable },
     },
   });
 
   if (!shipments.length) {
-    return { ok: false, message: "No cancellable shipments were selected." };
+    return { ok: false, message: "No cancellable shipments found (they may already be terminal)." };
   }
 
   const settings = await getSettings(storeId, { decrypt: true });
-  const client = new LeopardApiClient({ storeId, settings });
-  const result = await client.cancelBookedPackets(
-    shipments.map((s) => s.cnNumber),
-  );
+  const client   = new LeopardApiClient({ storeId, settings });
+  const result   = await client.cancelBookedPackets(shipments.map((s) => s.cnNumber));
 
-  // Parse per-CN errors regardless of overall ok/fail status.
   const cnErrors = parsePerCnErrors(result?.raw);
 
   if (!result.ok && Object.keys(cnErrors).length === 0) {
-    // Total failure with no per-CN detail — mark every requested CN as failed.
-    return {
-      ok: false,
-      message: result.message ?? "Leopards rejected the cancel request.",
-    };
+    return { ok: false, message: result.message ?? "Leopards rejected the cancel request." };
   }
 
   const cancellableShipments = shipments.filter((s) => !cnErrors[s.cnNumber]);
@@ -142,12 +109,8 @@ export async function cancelShipments(storeId, cnNumbers) {
     .filter((s) => cnErrors[s.cnNumber])
     .map((s) => ({ cn: s.cnNumber, reason: cnErrors[s.cnNumber] }));
 
-  if (cancellableShipments.length === 0) {
-    return {
-      ok: false,
-      message: "Leopards rejected every cancellation.",
-      failed,
-    };
+  if (!cancellableShipments.length) {
+    return { ok: false, message: "Leopards rejected every cancellation.", failed };
   }
 
   const ids = cancellableShipments.map((s) => s.id);
@@ -156,40 +119,30 @@ export async function cancelShipments(storeId, cnNumbers) {
   await db.$transaction([
     db.shipment.updateMany({
       where: { id: { in: ids } },
-      data: { status: "CANCELLED", cancelledAt: now, lastError: null },
+      data:  { status: "CANCELLED", cancelledAt: now, lastError: null },
     }),
     db.shipmentLog.createMany({
       data: cancellableShipments.map((s) => ({
         shipmentId: s.id,
-        eventType: "CANCELLED",
+        eventType:  "CANCELLED",
         fromStatus: s.status,
-        toStatus: "CANCELLED",
-        message: "Cancelled through Leopards",
+        toStatus:   "CANCELLED",
+        message:    "Cancelled through Leopards",
       })),
     }),
   ]);
 
-  const message =
-    failed.length > 0
-      ? `${cancellableShipments.length} cancelled, ${failed.length} failed.`
-      : `${cancellableShipments.length} shipment(s) cancelled.`;
-
   return {
-    ok: true,
-    message,
+    ok:        true,
+    message:   failed.length > 0
+      ? `${cancellableShipments.length} cancelled, ${failed.length} failed.`
+      : `${cancellableShipments.length} shipment(s) cancelled.`,
     cancelled: cancellableShipments.length,
     failed,
   };
 }
 
-function extractTrackedPackets(result) {
-  const source =
-    result?.data?.packet_list ??
-    result?.raw?.packet_list ??
-    result?.data ??
-    [];
-  return Array.isArray(source) ? source : [];
-}
+// ── Status sync ───────────────────────────────────────────────────────────────
 
 export async function refreshShipmentStatuses(storeId, cnNumbers = []) {
   const settings = await getSettings(storeId, { decrypt: true });
@@ -197,7 +150,7 @@ export async function refreshShipmentStatuses(storeId, cnNumbers = []) {
     where: {
       storeId,
       cnNumber: cnNumbers.length ? { in: cnNumbers } : { not: null },
-      status: { notIn: TERMINAL_STATUSES },
+      status:   { notIn: TERMINAL_STATUSES },
     },
   });
 
@@ -205,41 +158,47 @@ export async function refreshShipmentStatuses(storeId, cnNumbers = []) {
     return { ok: false, message: "No active shipments need status refresh." };
   }
 
-  const client = new LeopardApiClient({ storeId, settings });
-
-  const CHUNK_SIZE = 50;
-  const allCns = shipments.map((s) => s.cnNumber);
+  const client     = new LeopardApiClient({ storeId, settings });
+  const CHUNK_SIZE = 20; // conservative limit per Leopards API call
+  const CONCURRENCY = 3;
+  const allCns     = shipments.map((s) => s.cnNumber);
   const allPackets = [];
   const chunkErrors = [];
 
+  // Split into chunks, process up to CONCURRENCY chunks in parallel
+  const chunks = [];
   for (let i = 0; i < allCns.length; i += CHUNK_SIZE) {
-    const chunk = allCns.slice(i, i + CHUNK_SIZE);
-    const result = await client.trackBookedPacket(chunk);
-    if (!result.ok) {
-      chunkErrors.push(result.message ?? "Leopards API error");
-      continue;
+    chunks.push(allCns.slice(i, i + CHUNK_SIZE));
+  }
+
+  for (let i = 0; i < chunks.length; i += CONCURRENCY) {
+    const batch = await Promise.allSettled(
+      chunks.slice(i, i + CONCURRENCY).map((chunk) => client.trackBookedPacket(chunk)),
+    );
+    for (const item of batch) {
+      if (item.status === "fulfilled" && item.value.ok) {
+        allPackets.push(...extractTrackedPackets(item.value));
+      } else {
+        const msg = item.status === "rejected"
+          ? item.reason?.message
+          : item.value?.message;
+        chunkErrors.push(msg ?? "Leopards API error");
+      }
     }
-    allPackets.push(...extractTrackedPackets(result));
   }
 
   if (!allPackets.length && chunkErrors.length) {
     return { ok: false, message: chunkErrors[0] };
   }
 
-  const byCn = new Map(
-    allPackets.map((packet) => [
-      String(packet.track_number ?? packet.cn_number ?? packet.CN ?? ""),
-      packet,
-    ]),
-  );
-
+  const byCn = buildPacketMap(allPackets);
   return applyStatusUpdates(storeId, shipments, byCn);
 }
 
 export async function refreshShipmentStatusesByDateRange(storeId, fromDate, toDate) {
   const settings = await getSettings(storeId, { decrypt: true });
-  const client = new LeopardApiClient({ storeId, settings });
-  const result = await client.getBookedPacketLastStatus(fromDate, toDate);
+  const client   = new LeopardApiClient({ storeId, settings });
+  const result   = await client.getBookedPacketLastStatus(fromDate, toDate);
 
   if (!result.ok) return result;
 
@@ -260,58 +219,102 @@ export async function refreshShipmentStatusesByDateRange(storeId, fromDate, toDa
     where: { storeId, cnNumber: { in: cnNumbers } },
   });
 
-  const byCn = new Map(
-    packets.map((packet) => [
-      String(packet.tracking_number ?? packet.track_number ?? packet.cn_number ?? ""),
-      packet,
+  return applyStatusUpdates(storeId, shipments, buildPacketMap(packets));
+}
+
+// ── Internal helpers ──────────────────────────────────────────────────────────
+
+function buildWhere(storeId, status, query) {
+  return {
+    storeId,
+    ...(status ? { status } : {}),
+    ...(query
+      ? {
+          OR: [
+            { cnNumber:         { contains: query, mode: "insensitive" } },
+            { shopifyOrderName: { contains: query, mode: "insensitive" } },
+            { consigneeName:    { contains: query, mode: "insensitive" } },
+          ],
+        }
+      : {}),
+  };
+}
+
+function parsePerCnErrors(raw) {
+  const errSource = raw?.error ?? raw?.data?.error;
+  if (!errSource || typeof errSource !== "object") return {};
+  const out = {};
+  for (const [key, value] of Object.entries(errSource)) {
+    out[String(key)] = typeof value === "string" ? value : JSON.stringify(value);
+  }
+  return out;
+}
+
+function extractTrackedPackets(result) {
+  const source =
+    result?.data?.packet_list ??
+    result?.raw?.packet_list ??
+    result?.data ??
+    [];
+  return Array.isArray(source) ? source : [];
+}
+
+function buildPacketMap(packets) {
+  return new Map(
+    packets.map((p) => [
+      String(p.track_number ?? p.tracking_number ?? p.cn_number ?? p.CN ?? ""),
+      p,
     ]),
   );
-
-  return applyStatusUpdates(storeId, shipments, byCn);
 }
 
 async function applyStatusUpdates(storeId, shipments, byCn) {
-  const shipmentUpdates = [];
+  const updates    = [];
   const logEntries = [];
 
   for (const shipment of shipments) {
+    // State machine: terminal shipments are immutable
+    if (isTerminal(shipment.status)) continue;
+
     const packet = byCn.get(String(shipment.cnNumber));
     if (!packet) continue;
 
-    const rawStatus =
-      packet.booked_packet_status ?? packet.status ?? packet.packet_status;
-    const nextStatus = mapLeopardStatus(rawStatus);
-
+    const rawStatus  = packet.booked_packet_status ?? packet.status ?? packet.packet_status;
     if (!rawStatus) continue;
-    if (nextStatus === shipment.status && shipment.leopardStatusRaw === String(rawStatus)) {
-      continue;
-    }
 
-    shipmentUpdates.push({ shipment, nextStatus, rawStatus: String(rawStatus) });
+    const rawStr    = String(rawStatus);
+    const desired   = mapLeopardStatus(rawStr);
+    // safeTransition enforces the state machine — no regressions possible
+    const nextStatus = safeTransition(shipment.status, desired, `CN ${shipment.cnNumber}`);
+
+    if (
+      nextStatus === shipment.status &&
+      shipment.leopardStatusRaw === rawStr
+    ) continue; // nothing changed
+
+    updates.push({ shipment, nextStatus, rawStr });
 
     if (nextStatus !== shipment.status) {
       logEntries.push({
         shipmentId: shipment.id,
-        eventType: "STATUS_CHANGE",
+        eventType:  "STATUS_CHANGE",
         fromStatus: shipment.status,
-        toStatus: nextStatus,
-        message: String(rawStatus),
+        toStatus:   nextStatus,
+        message:    rawStr,
       });
     }
   }
 
-  if (!shipmentUpdates.length) {
+  if (!updates.length) {
     return { ok: true, message: "All statuses are already up to date." };
   }
 
-  // Single transaction with per-row updates (necessary since leopardStatusRaw differs per row).
-  // updateMany cannot set different values per row, so individual update() calls are batched into a tx.
-  const txOps = shipmentUpdates.map(({ shipment, nextStatus, rawStatus }) =>
+  const txOps = updates.map(({ shipment, nextStatus, rawStr }) =>
     db.shipment.update({
       where: { id: shipment.id },
-      data: {
-        status: nextStatus,
-        leopardStatusRaw: rawStatus,
+      data:  {
+        status:           nextStatus,
+        leopardStatusRaw: rawStr,
         ...(nextStatus === "DELIVERED" && shipment.status !== "DELIVERED"
           ? { deliveredAt: new Date() }
           : {}),
@@ -329,8 +332,8 @@ async function applyStatusUpdates(storeId, shipments, byCn) {
   await db.$transaction(txOps);
 
   return {
-    ok: true,
-    message: `${shipmentUpdates.length} shipment status(es) updated.`,
-    updated: shipmentUpdates.length,
+    ok:      true,
+    message: `${updates.length} shipment status(es) updated.`,
+    updated: updates.length,
   };
 }

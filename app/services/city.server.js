@@ -8,16 +8,18 @@ function extractCities(result) {
   return Array.isArray(source) ? source : [];
 }
 
+// ── Cache refresh ─────────────────────────────────────────────────────────────
+
 export async function refreshCities(storeId) {
   const settings = await getSettings(storeId, { decrypt: true });
-  const client = new LeopardApiClient({ storeId, settings });
-  const result = await client.getAllCities();
+  const client   = new LeopardApiClient({ storeId, settings });
+  const result   = await client.getAllCities();
 
   if (!result.ok) return result;
 
   const cities = extractCities(result);
   const validCities = cities.filter((city) => {
-    const id = Number(city.id ?? city.city_id ?? city.leopard_city_id);
+    const id   = Number(city.id ?? city.city_id ?? city.leopard_city_id);
     const name = city.name ?? city.city_name ?? city.cityName;
     return id && name;
   });
@@ -26,39 +28,34 @@ export async function refreshCities(storeId) {
     return { ok: false, message: "No valid cities returned by Leopards API." };
   }
 
-  // Delete and recreate — fastest pattern for a periodic cache refresh.
-  // Avoids N+1 upserts across potentially hundreds of cities.
+  // Delete-then-create inside a transaction: fastest pattern for periodic full refresh.
   await db.$transaction([
     db.cityCache.deleteMany({ where: { storeId } }),
     db.cityCache.createMany({
-      data: validCities.map((city) => {
-        const id = Number(city.id ?? city.city_id ?? city.leopard_city_id);
-        const name = city.name ?? city.city_name ?? city.cityName;
-        return {
-          storeId,
-          leopardCityId: id,
-          name,
-          nameNormalized: normalizeCity(name),
-          refreshedAt: new Date(),
-        };
-      }),
+      data: validCities.map((city) => ({
+        storeId,
+        leopardCityId:  Number(city.id ?? city.city_id ?? city.leopard_city_id),
+        name:           city.name ?? city.city_name ?? city.cityName,
+        nameNormalized: normalizeCity(city.name ?? city.city_name ?? city.cityName),
+        refreshedAt:    new Date(),
+      })),
     }),
   ]);
 
   return { ok: true, message: `${validCities.length} cities refreshed.` };
 }
 
+// ── Single-order city resolution (3-stage fuzzy, used for single bookings) ───
+
 export async function resolveCity(storeId, cityName) {
   const normalized = normalizeCity(cityName);
   if (!normalized) return null;
 
-  // 1. Exact normalized match — best.
   const exact = await db.cityCache.findFirst({
     where: { storeId, nameNormalized: normalized },
   });
   if (exact) return exact;
 
-  // 2. Prefix (startsWith) match — prefer "Lahore" over "Lahore Cantt" by sorting by name length ascending.
   const startsWith = await db.cityCache.findMany({
     where: { storeId, nameNormalized: { startsWith: normalized } },
   });
@@ -66,7 +63,6 @@ export async function resolveCity(storeId, cityName) {
     return startsWith.sort((a, b) => a.name.length - b.name.length)[0];
   }
 
-  // 3. Contains (last-resort fuzzy match) — also prefer the shortest match.
   const contains = await db.cityCache.findMany({
     where: { storeId, nameNormalized: { contains: normalized } },
   });
@@ -76,6 +72,52 @@ export async function resolveCity(storeId, cityName) {
 
   return null;
 }
+
+/**
+ * Batch city resolution using a SINGLE DB query + in-memory matching.
+ *
+ * Replaces the old pattern of calling resolveCity() N times (up to 3 DB hits each).
+ * For 50 orders: old = up to 150 queries, new = 1 query.
+ *
+ * Returns a Map<cityName, cityRecord | null> keyed by the original (un-normalized) city name.
+ */
+export async function batchResolveCitiesInMemory(storeId, cityNames) {
+  const unique = [...new Set(cityNames.filter(Boolean))];
+  if (!unique.length) return new Map();
+
+  const allCities = await db.cityCache.findMany({ where: { storeId } });
+  const result    = new Map();
+
+  for (const name of unique) {
+    result.set(name, matchCityInMemory(allCities, normalizeCity(name)));
+  }
+
+  return result;
+}
+
+function matchCityInMemory(allCities, normalized) {
+  if (!normalized) return null;
+
+  // 1. Exact
+  const exact = allCities.find((c) => c.nameNormalized === normalized);
+  if (exact) return exact;
+
+  // 2. Prefix (shortest match preferred)
+  const prefixMatches = allCities
+    .filter((c) => c.nameNormalized.startsWith(normalized))
+    .sort((a, b) => a.name.length - b.name.length);
+  if (prefixMatches.length) return prefixMatches[0];
+
+  // 3. Contains (shortest match preferred)
+  const containsMatches = allCities
+    .filter((c) => c.nameNormalized.includes(normalized))
+    .sort((a, b) => a.name.length - b.name.length);
+  if (containsMatches.length) return containsMatches[0];
+
+  return null;
+}
+
+// ── Lookup helpers ────────────────────────────────────────────────────────────
 
 export async function resolveCityName(storeId, leopardCityId) {
   if (!leopardCityId) return null;
@@ -89,7 +131,7 @@ export async function batchResolveCityNames(storeId, cityIds) {
   const unique = [...new Set((cityIds ?? []).filter(Boolean).map(Number))];
   if (!unique.length) return new Map();
   const rows = await db.cityCache.findMany({
-    where: { storeId, leopardCityId: { in: unique } },
+    where:  { storeId, leopardCityId: { in: unique } },
     select: { leopardCityId: true, name: true },
   });
   const map = new Map();
@@ -99,7 +141,7 @@ export async function batchResolveCityNames(storeId, cityIds) {
 
 export async function listOriginCities(storeId) {
   return db.cityCache.findMany({
-    where: { storeId, allowAsOrigin: true },
+    where:   { storeId, allowAsOrigin: true },
     orderBy: { name: "asc" },
   });
 }
@@ -108,10 +150,10 @@ export async function getCityCacheStats(storeId) {
   const stats = await db.cityCache.aggregate({
     where: { storeId },
     _count: { _all: true },
-    _max: { refreshedAt: true },
+    _max:   { refreshedAt: true },
   });
   return {
-    count: stats._count._all,
+    count:           stats._count._all,
     lastRefreshedAt: stats._max.refreshedAt?.toISOString() ?? null,
   };
 }
