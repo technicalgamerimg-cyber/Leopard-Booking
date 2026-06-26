@@ -1,49 +1,10 @@
 import { Outlet, useLoaderData, useLocation, useRouteError } from "react-router";
-import { redirect } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { AppProvider } from "@shopify/shopify-app-react-router/react";
 import { authenticate } from "../shopify.server";
-import db from "../db.server";
-import { getSettings } from "../services/settings.server";
-import { getCityCacheStats } from "../services/city.server";
 
 export const loader = async ({ request }) => {
-  const { session } = await authenticate.admin(request);
-  const url = new URL(request.url);
-
-  if (url.pathname !== "/app/onboarding") {
-    const store = await db.store.findUnique({
-      where: { shopDomain: session.shop },
-      select: { id: true },
-    });
-
-    if (store) {
-      const [settings, cityStats] = await Promise.all([
-        getSettings(store.id),
-        getCityCacheStats(store.id),
-      ]);
-
-      const complete = Boolean(
-        settings.hasCredentials &&
-        settings.leopardEnvironment &&
-        cityStats.count > 0 &&
-        settings.originCityId &&
-        settings.shipperName &&
-        settings.shipperPhone &&
-        settings.shipperAddress &&
-        settings.defaultWeightGrams,
-      );
-
-      if (!complete) {
-        const onboardingUrl = new URL("/app/onboarding", request.url);
-        const shop = url.searchParams.get("shop");
-        const host = url.searchParams.get("host");
-        if (shop) onboardingUrl.searchParams.set("shop", shop);
-        if (host) onboardingUrl.searchParams.set("host", host);
-        throw redirect(onboardingUrl.pathname + (onboardingUrl.search || ""));
-      }
-    }
-  }
+  await authenticate.admin(request);
 
   // eslint-disable-next-line no-undef
   return { apiKey: process.env.SHOPIFY_API_KEY || "" };

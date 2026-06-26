@@ -1,14 +1,37 @@
 import { useState } from "react";
 import { boundary } from "@shopify/shopify-app-react-router/server";
-import { useLoaderData, useRouteError } from "react-router";
+import { redirect, useLoaderData, useRouteError } from "react-router";
 import { useAppBridge } from "@shopify/app-bridge-react";
 import { authenticate } from "../shopify.server";
 import { ensureStore } from "../services/store.server";
+import { getSettings } from "../services/settings.server";
+import { getCityCacheStats } from "../services/city.server";
 import { getDashboard } from "../services/dashboard.server";
 
 export const loader = async ({ request }) => {
   const { session } = await authenticate.admin(request);
   const store = await ensureStore(session);
+
+  const [settings, cityStats] = await Promise.all([
+    getSettings(store.id),
+    getCityCacheStats(store.id),
+  ]);
+
+  const complete = Boolean(
+    settings.hasCredentials &&
+    settings.leopardEnvironment &&
+    cityStats.count > 0 &&
+    settings.originCityId &&
+    settings.shipperName &&
+    settings.shipperPhone &&
+    settings.shipperAddress &&
+    settings.defaultWeightGrams,
+  );
+
+  if (!complete) {
+    throw redirect("/app/onboarding");
+  }
+
   return getDashboard(store.id);
 };
 
