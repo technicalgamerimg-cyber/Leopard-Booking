@@ -1,6 +1,7 @@
 import { useState } from "react";
 import {
   Form,
+  Link,
   redirect,
   useFetcher,
   useLoaderData,
@@ -47,7 +48,9 @@ export const loader = async ({ request }) => {
   const originCities = step === 4 ? await listOriginCities(store.id) : [];
   if (step === 4) console.log("[onboarding] listOriginCities", Math.round(performance.now() - t2), "ms");
 
-  if (step !== TOTAL_STEPS && isOnboardingComplete(settings, cityStats)) {
+  // Only redirect on step 1 (welcome screen). Steps 2–6 should never be
+  // interrupted mid-flow, even if the merchant has already completed setup.
+  if (step === 1 && isOnboardingComplete(settings, cityStats)) {
     throw redirect("/app");
   }
 
@@ -73,7 +76,6 @@ export const action = async ({ request }) => {
   if (intent === "load-cities")     return refreshCities(store.id);
 
   if (intent === "save-credentials") {
-    formData.set("environment", "production");
     const result = await saveSettings(store.id, formData);
     if (!result.ok) return result;
     return redirect("/app/onboarding?step=3");
@@ -186,11 +188,12 @@ function StepWelcome() {
         ))}
       </div>
 
-      <Form method="post">
-        <input type="hidden" name="intent" value="next-step" />
-        <input type="hidden" name="nextStep" value="2" />
-        <s-button type="submit" variant="primary">Get Started →</s-button>
-      </Form>
+      <Link
+        to="/app/onboarding?step=2"
+        style={{ display: "inline-block", padding: "10px 28px", background: "#5c6ac4", color: "#fff", borderRadius: 6, fontSize: 14, fontWeight: 700, textDecoration: "none" }}
+      >
+        Get Started →
+      </Link>
     </div>
   );
 }
@@ -310,13 +313,18 @@ function StepCities({ settings, cityStats, cityFetcher, cityBusy, citiesLoaded, 
           </s-button>
         </cityFetcher.Form>
 
-        <Form method="post" style={{ display: "contents" }}>
-          <input type="hidden" name="intent" value="next-step" />
-          <input type="hidden" name="nextStep" value="4" />
-          <s-button type="submit" variant="primary" disabled={!citiesLoaded}>
-            Continue
-          </s-button>
-        </Form>
+        <Link
+          to="/app/onboarding?step=4"
+          style={{
+            display: "inline-block", padding: "10px 20px",
+            background: citiesLoaded ? "#5c6ac4" : "#c4cdd5",
+            color: "#fff", borderRadius: 6, fontSize: 14, fontWeight: 600, textDecoration: "none",
+            pointerEvents: citiesLoaded ? "auto" : "none", opacity: citiesLoaded ? 1 : 0.6,
+          }}
+          onClick={(e) => { if (!citiesLoaded) e.preventDefault(); }}
+        >
+          Continue
+        </Link>
       </div>
 
       {!settings.hasCredentials && (

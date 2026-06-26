@@ -177,16 +177,6 @@ export default function Settings() {
           {/* Save credentials form */}
           <credFetcher.Form method="post">
             <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-              <s-select
-                label="Environment"
-                name="environment"
-                defaultValue={settings.leopardEnvironment}
-                helpText="Use Staging to test without real bookings. Switch to Production when ready to go live."
-              >
-                <s-option value="staging">Staging (for testing)</s-option>
-                <s-option value="production">Production (live bookings)</s-option>
-              </s-select>
-
               <s-text-field
                 label="API key"
                 name="apiKey"

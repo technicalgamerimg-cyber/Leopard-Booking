@@ -64,12 +64,18 @@ export async function getSettings(storeId, { decrypt = false } = {}) {
           storeId,
           defaultShipmentId:  Number(process.env.LEOPARDS_DEFAULT_SHIPMENT_ID ?? 1),
           defaultWeightGrams: Number(process.env.DEFAULT_PACKET_WEIGHT_GRAMS ?? 1000),
-          leopardEnvironment:
-            process.env.LEOPARDS_DEFAULT_ENVIRONMENT === "production"
-              ? "production"
-              : "staging",
+          // Leopards staging is no longer supported. Always use production API.
+          leopardEnvironment: "production",
         },
         update: {},
+      });
+    } else if (raw.leopardEnvironment === "staging") {
+      // One-time self-healing migration: existing rows stored "staging" before
+      // the staging option was removed. Repair on first access so bookings
+      // hit the correct production API without requiring a manual settings save.
+      raw = await db.settings.update({
+        where: { storeId },
+        data:  { leopardEnvironment: "production" },
       });
     }
 
@@ -96,9 +102,8 @@ export async function saveSettings(storeId, formData) {
   const apiKey      = normalizeString(formData.get("apiKey"));
   const apiPassword = normalizeString(formData.get("apiPassword"));
 
-  const environment = formData.has("environment")
-    ? formData.get("environment") === "production" ? "production" : "staging"
-    : current.leopardEnvironment;
+  // Leopards staging is no longer supported. Always use production API.
+  const environment = "production";
 
   const data = {
     leopardEnvironment: environment,
