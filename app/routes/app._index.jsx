@@ -112,49 +112,14 @@ export default function Dashboard() {
     }
   }
 
-  const isSetupComplete = hasCredentials && hasOriginCity;
   const needsAttentionCount = (awaitingBooking ?? 0) + (failedBookings ?? 0) + (counts.EXCEPTION ?? 0);
   const inFlightCount = (counts.BOOKED ?? 0) + (counts.IN_TRANSIT ?? 0);
 
   return (
     <s-page heading="Dashboard">
 
-      {/* ── Setup checklist ── */}
-      {!isSetupComplete && (
-        <s-section>
-          <div style={{ background: "#fff8ec", border: "1px solid #e8912d", borderRadius: 8, padding: "16px 20px" }}>
-            <div style={{ display: "flex", gap: 12, alignItems: "flex-start" }}>
-              <div style={{ fontSize: 22, flexShrink: 0 }}>⚙️</div>
-              <div style={{ flex: 1 }}>
-                <div style={{ fontWeight: 700, fontSize: 14, color: "#5c3500", marginBottom: 8 }}>
-                  Complete setup to start booking shipments
-                </div>
-                <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                  {[
-                    { done: hasCredentials, label: "Save your Leopards API credentials" },
-                    { done: hasCredentials, label: "Test connection and refresh city list" },
-                    { done: hasOriginCity, label: "Set origin city and shipper details" },
-                  ].map((step, i) => (
-                    <div key={i} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: step.done ? "#3d8b40" : "#8a4b00" }}>
-                      <span style={{ fontSize: 15 }}>{step.done ? "✅" : "⬜"}</span>
-                      <span style={{ textDecoration: step.done ? "line-through" : "none", opacity: step.done ? 0.6 : 1 }}>{step.label}</span>
-                    </div>
-                  ))}
-                </div>
-                <a
-                  href="/app/settings"
-                  style={{ display: "inline-block", marginTop: 12, padding: "7px 16px", background: "#e8912d", color: "#fff", borderRadius: 6, fontSize: 13, fontWeight: 600, textDecoration: "none" }}
-                >
-                  Open Settings →
-                </a>
-              </div>
-            </div>
-          </div>
-        </s-section>
-      )}
-
       {/* ── Needs attention alert ── */}
-      {needsAttentionCount > 0 && isSetupComplete && (
+      {needsAttentionCount > 0 && (
         <s-section>
           <div style={{ background: "#fce8e7", border: "1px solid #d72c0d", borderRadius: 8, padding: "14px 18px", display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 12 }}>
             <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
@@ -305,10 +270,10 @@ export default function Dashboard() {
             <span className="lb-empty-icon">📦</span>
             <div className="lb-empty-title">No shipment activity yet</div>
             <div className="lb-empty-desc" style={{ marginBottom: 16 }}>
-              {isSetupComplete ? "Book your first order to see activity here." : "Complete setup first, then book your first order."}
+              Book your first order to see activity here.
             </div>
-            <a href={isSetupComplete ? "/app/orders" : "/app/settings"} className="lb-btn lb-btn-primary">
-              {isSetupComplete ? "Book an order" : "Open Settings"}
+            <a href="/app/orders" className="lb-btn lb-btn-primary">
+              Book an order
             </a>
           </div>
         )}
