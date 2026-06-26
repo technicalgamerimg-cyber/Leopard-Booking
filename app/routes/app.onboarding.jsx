@@ -33,13 +33,19 @@ export const loader = async ({ request }) => {
   const { session } = await authenticate.admin(request);
   const store = await ensureStore(session);
   const url = new URL(request.url);
-  const step = Math.max(1, Math.min(TOTAL_STEPS, parseInt(url.searchParams.get("step") ?? "1", 10)));
+  const step = Math.max(1, Math.min(TOTAL_STEPS, Number(url.searchParams.get("step") ?? 1)));
 
-  const [settings, cityStats, originCities] = await Promise.all([
-    getSettings(store.id),
-    getCityCacheStats(store.id),
-    listOriginCities(store.id),
-  ]);
+  const t0 = performance.now();
+  const settings = await getSettings(store.id);
+  console.log("[onboarding] getSettings", Math.round(performance.now() - t0), "ms");
+
+  const t1 = performance.now();
+  const cityStats = await getCityCacheStats(store.id);
+  console.log("[onboarding] getCityCacheStats", Math.round(performance.now() - t1), "ms");
+
+  const t2 = performance.now();
+  const originCities = step === 4 ? await listOriginCities(store.id) : [];
+  if (step === 4) console.log("[onboarding] listOriginCities", Math.round(performance.now() - t2), "ms");
 
   if (step !== TOTAL_STEPS && isOnboardingComplete(settings, cityStats)) {
     throw redirect("/app");
@@ -67,6 +73,7 @@ export const action = async ({ request }) => {
   if (intent === "load-cities")     return refreshCities(store.id);
 
   if (intent === "save-credentials") {
+    formData.set("environment", "production");
     const result = await saveSettings(store.id, formData);
     if (!result.ok) return result;
     return redirect("/app/onboarding?step=3");
@@ -207,16 +214,6 @@ function StepCredentials({ settings, actionData, testFetcher, testBusy, isSaving
       <Form method="post">
         <input type="hidden" name="intent" value="save-credentials" />
         <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-          <s-select
-            label="Environment"
-            name="environment"
-            defaultValue={settings.leopardEnvironment ?? "staging"}
-            helpText="Use Staging to test without real bookings. Switch to Production when ready to go live."
-          >
-            <s-option value="staging">Staging (for testing)</s-option>
-            <s-option value="production">Production (live bookings)</s-option>
-          </s-select>
-
           <s-text-field
             label="API Key"
             name="apiKey"

@@ -21,23 +21,28 @@ const NAV_ITEMS = [
 export default function App() {
   const { apiKey } = useLoaderData();
   const location = useLocation();
+  // pathname check is acceptable here — Shopify embedded apps don't expose
+  // matched-route data at the layout level without additional setup
+  const isOnboarding = location.pathname.startsWith("/app/onboarding");
 
   return (
     <AppProvider embedded apiKey={apiKey}>
-      <s-app-nav>
-        {NAV_ITEMS.map((item) => {
-          const isActive = item.match(location.pathname);
-          return (
-            <s-link
-              key={item.href}
-              href={item.href}
-              aria-current={isActive ? "page" : undefined}
-            >
-              {item.label}
-            </s-link>
-          );
-        })}
-      </s-app-nav>
+      {!isOnboarding && (
+        <s-app-nav>
+          {NAV_ITEMS.map((item) => {
+            const isActive = item.match(location.pathname);
+            return (
+              <s-link
+                key={item.href}
+                href={item.href}
+                aria-current={isActive ? "page" : undefined}
+              >
+                {item.label}
+              </s-link>
+            );
+          })}
+        </s-app-nav>
+      )}
       <Outlet />
     </AppProvider>
   );
