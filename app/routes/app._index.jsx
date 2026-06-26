@@ -29,7 +29,12 @@ export const loader = async ({ request }) => {
   );
 
   if (!complete) {
-    throw redirect("/app/onboarding");
+    const incomingUrl = new URL(request.url);
+    const onboardingUrl = new URL("/app/onboarding", request.url);
+    for (const [key, value] of incomingUrl.searchParams.entries()) {
+      onboardingUrl.searchParams.set(key, value);
+    }
+    throw redirect(onboardingUrl.pathname + onboardingUrl.search);
   }
 
   return getDashboard(store.id);
