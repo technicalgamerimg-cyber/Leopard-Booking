@@ -35,7 +35,12 @@ export const loader = async ({ request }) => {
       );
 
       if (!complete) {
-        throw redirect("/app/onboarding");
+        const onboardingUrl = new URL("/app/onboarding", request.url);
+        const shop = url.searchParams.get("shop");
+        const host = url.searchParams.get("host");
+        if (shop) onboardingUrl.searchParams.set("shop", shop);
+        if (host) onboardingUrl.searchParams.set("host", host);
+        throw redirect(onboardingUrl.pathname + (onboardingUrl.search || ""));
       }
     }
   }
