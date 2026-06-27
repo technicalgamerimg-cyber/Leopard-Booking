@@ -480,27 +480,27 @@ function StepAllDone() {
       </div>
 
       <div style={{ marginBottom: 20 }}>
-        <a
-          href="/app/orders"
+        <Link
+          to="/app/orders"
           style={{ display: "inline-block", padding: "12px 32px", background: "#5c6ac4", color: "#fff", borderRadius: 6, fontSize: 15, fontWeight: 700, textDecoration: "none" }}
         >
           Book Your First Order →
-        </a>
+        </Link>
       </div>
 
       <div style={{ display: "flex", justifyContent: "center", gap: 24, flexWrap: "wrap" }}>
         {[
-          { href: "/app/shipments", label: "View Shipments" },
-          { href: "/app/loadsheets", label: "Create Loadsheet" },
-          { href: "/app", label: "Open Dashboard" },
+          { to: "/app/shipments", label: "View Shipments" },
+          { to: "/app/loadsheets", label: "Create Loadsheet" },
+          { to: "/app", label: "Open Dashboard" },
         ].map((link) => (
-          <a
-            key={link.href}
-            href={link.href}
+          <Link
+            key={link.to}
+            to={link.to}
             style={{ fontSize: 13, color: "#5c6ac4", fontWeight: 600, textDecoration: "none" }}
           >
             {link.label}
-          </a>
+          </Link>
         ))}
       </div>
     </div>
