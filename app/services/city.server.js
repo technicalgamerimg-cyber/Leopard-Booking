@@ -15,7 +15,7 @@ export async function refreshCities(storeId) {
   const client   = new LeopardApiClient({ storeId, settings });
   const result   = await client.getAllCities();
 
-  if (!result.ok) return result;
+  if (!result.ok) return { ok: false, message: result.message };
 
   const cities = extractCities(result);
   const validCities = cities.filter((city) => {
@@ -143,6 +143,7 @@ export async function listOriginCities(storeId) {
   return db.cityCache.findMany({
     where:   { storeId, allowAsOrigin: true },
     orderBy: { name: "asc" },
+    take:    500,
   });
 }
 

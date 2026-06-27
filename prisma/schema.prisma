@@ -92,7 +92,7 @@ model Settings {
   store                       Store              @relation(fields: [storeId], references: [id], onDelete: Cascade)
   leopardApiKey               String?
   leopardApiPassword          String?
-  leopardEnvironment          LeopardEnvironment @default(staging)
+  leopardEnvironment          LeopardEnvironment @default(production)
   originCityId                Int?
   shipperName                 String?
   shipperPhone                String?
@@ -127,6 +127,7 @@ model Shipment {
   consigneePhone      String
   consigneeAddress    String
   lastError           String?
+  writebackFailed     Boolean         @default(false)
   bookingLockedAt     DateTime?
   bookedAt            DateTime?
   deliveredAt         DateTime?

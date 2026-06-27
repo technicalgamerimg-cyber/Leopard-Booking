@@ -279,6 +279,14 @@ export default function ShipmentDetail() {
           </div>
         </s-section>
       )}
+      {shipment.writebackFailed && (
+        <s-section>
+          <div className="lb-alert lb-alert-warning" style={{ flexDirection: "column", alignItems: "stretch" }}>
+            <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 4 }}>⚠ Shopify fulfillment not synced</div>
+            <div style={{ fontSize: 13 }}>This shipment was booked in Leopards but Shopify was not updated. Go to the order in Shopify Admin and mark it as fulfilled with CN {shipment.cnNumber}.</div>
+          </div>
+        </s-section>
+      )}
 
       {/* ── Details + Tracking side by side ── */}
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(300px, 1fr))", gap: 0 }}>

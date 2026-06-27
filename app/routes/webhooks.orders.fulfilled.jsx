@@ -22,7 +22,7 @@ export const action = async ({ request }) => {
     await db.$transaction([
       db.shipment.update({
         where: { id: shipment.id },
-        data: { status: "IN_TRANSIT" },
+        data: { status: "IN_TRANSIT", writebackFailed: false },
       }),
       db.shipmentLog.create({
         data: {

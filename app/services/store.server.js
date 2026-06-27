@@ -19,9 +19,8 @@ export async function ensureStore(session) {
       settings: {
         create: {
           defaultWeightGrams: Number(process.env.DEFAULT_PACKET_WEIGHT_GRAMS ?? 1000),
-          leopardEnvironment: process.env.LEOPARDS_DEFAULT_ENVIRONMENT === "production"
-            ? "production"
-            : "staging",
+          // Leopards staging is no longer supported. Always use production API.
+          leopardEnvironment: "production",
         },
       },
     },

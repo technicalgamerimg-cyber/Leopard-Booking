@@ -49,37 +49,58 @@ function shapeSettings(settings) {
   };
 }
 
+// ── Shared onboarding completion check ───────────────────────────────────────
+// Single source of truth used by both app._index.jsx and app.onboarding.jsx.
+// Changing the required fields here propagates to both routes automatically.
+
+export function isOnboardingComplete(settings, cityStats) {
+  return Boolean(
+    settings.hasCredentials &&
+    cityStats.count > 0 &&
+    settings.originCityId &&
+    settings.shipperName &&
+    settings.shipperPhone &&
+    settings.shipperAddress &&
+    settings.defaultWeightGrams,
+  );
+}
+
 // ── Public API ────────────────────────────────────────────────────────────────
 
 export async function getSettings(storeId, { decrypt = false } = {}) {
   let raw = _cacheGet(storeId);
 
   if (!raw) {
-    raw = await db.settings.findUnique({ where: { storeId } });
+    try {
+      raw = await db.settings.findUnique({ where: { storeId } });
 
-    if (!raw) {
-      raw = await db.settings.upsert({
-        where:  { storeId },
-        create: {
-          storeId,
-          defaultShipmentId:  Number(process.env.LEOPARDS_DEFAULT_SHIPMENT_ID ?? 1),
-          defaultWeightGrams: Number(process.env.DEFAULT_PACKET_WEIGHT_GRAMS ?? 1000),
-          // Leopards staging is no longer supported. Always use production API.
-          leopardEnvironment: "production",
-        },
-        update: {},
-      });
-    } else if (raw.leopardEnvironment === "staging") {
-      // One-time self-healing migration: existing rows stored "staging" before
-      // the staging option was removed. Repair on first access so bookings
-      // hit the correct production API without requiring a manual settings save.
-      raw = await db.settings.update({
-        where: { storeId },
-        data:  { leopardEnvironment: "production" },
-      });
+      if (!raw) {
+        raw = await db.settings.upsert({
+          where:  { storeId },
+          create: {
+            storeId,
+            defaultShipmentId:  Number(process.env.LEOPARDS_DEFAULT_SHIPMENT_ID ?? 1),
+            defaultWeightGrams: Number(process.env.DEFAULT_PACKET_WEIGHT_GRAMS ?? 1000),
+            // Leopards staging is no longer supported. Always use production API.
+            leopardEnvironment: "production",
+          },
+          update: {},
+        });
+      } else if (raw.leopardEnvironment === "staging") {
+        // One-time self-healing migration: existing rows stored "staging" before
+        // the staging option was removed. Repair on first access so bookings
+        // hit the correct production API without requiring a manual settings save.
+        raw = await db.settings.update({
+          where: { storeId },
+          data:  { leopardEnvironment: "production" },
+        });
+      }
+
+      _cachePut(storeId, raw);
+    } catch (err) {
+      console.error("[settings] getSettings DB error for store", storeId, ":", err.message);
+      throw err;
     }
-
-    _cachePut(storeId, raw);
   }
 
   if (!decrypt) return shapeSettings(raw);
@@ -107,8 +128,10 @@ export async function saveSettings(storeId, formData) {
 
   const data = {
     leopardEnvironment: environment,
+    // Provide current.originCityId as fallback so an invalid dropdown value
+    // (empty string, "0", NaN) never silently clears the origin city.
     originCityId: formData.has("originCityId")
-      ? parsePositiveInt(formData.get("originCityId"))
+      ? parsePositiveInt(formData.get("originCityId"), current.originCityId)
       : current.originCityId,
     shipperName: formData.has("shipperName")
       ? normalizeString(formData.get("shipperName")) || null
@@ -142,8 +165,13 @@ export async function saveSettings(storeId, formData) {
   if (apiKey)      data.leopardApiKey      = encryptSecret(apiKey);
   if (apiPassword) data.leopardApiPassword = encryptSecret(apiPassword);
 
-  await db.settings.update({ where: { storeId }, data });
-  invalidateSettingsCache(storeId);
+  // Use try/finally so the cache is always invalidated, even if the DB write
+  // fails. Without this, a failed update leaves stale cached data for up to 30s.
+  try {
+    await db.settings.update({ where: { storeId }, data });
+  } finally {
+    invalidateSettingsCache(storeId);
+  }
 
   return {
     ok: true,
@@ -154,11 +182,14 @@ export async function saveSettings(storeId, formData) {
 }
 
 export async function clearCredentials(storeId) {
-  await db.settings.update({
-    where: { storeId },
-    data:  { leopardApiKey: null, leopardApiPassword: null },
-  });
-  invalidateSettingsCache(storeId);
+  try {
+    await db.settings.update({
+      where: { storeId },
+      data:  { leopardApiKey: null, leopardApiPassword: null },
+    });
+  } finally {
+    invalidateSettingsCache(storeId);
+  }
   return { ok: true, message: "Leopards credentials cleared." };
 }
 
@@ -168,7 +199,12 @@ export async function testConnection(storeId) {
     return { ok: false, message: "Enter and save Leopards credentials first." };
   }
   const client = new LeopardApiClient({ storeId, settings });
-  const result = await client.getAllCities();
-  if (!result.ok) return result;
-  return { ok: true, message: "Leopards API connection successful." };
+  try {
+    const result = await client.getAllCities();
+    if (!result.ok) return { ok: false, message: result.message };
+    return { ok: true, message: "Leopards API connection successful." };
+  } catch (err) {
+    console.error("[settings] testConnection unexpected error:", err.message);
+    return { ok: false, message: `Connection test failed: ${err.message}` };
+  }
 }

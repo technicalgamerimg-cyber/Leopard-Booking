@@ -317,7 +317,7 @@ export async function refreshShipmentStatusesByDateRange(storeId, fromDate, toDa
   const client   = new LeopardApiClient({ storeId, settings });
   const result   = await client.getBookedPacketLastStatus(fromDate, toDate);
 
-  if (!result.ok) return result;
+  if (!result.ok) return { ok: false, message: result.message };
 
   const packets = extractTrackedPackets(result);
   if (!packets.length) {

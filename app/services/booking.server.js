@@ -9,7 +9,6 @@ import {
 import { resolveCity, batchResolveCitiesInMemory } from "./city.server";
 import { getSettings, getCodKeywords } from "./settings.server";
 import { getOrder } from "./shopify-orders.server";
-import { canTransition } from "../lib/shipment-state-machine.server";
 
 // ── Shopify GraphQL ──────────────────────────────────────────────────────────
 
@@ -264,7 +263,7 @@ async function releaseLock(storeId, orderId) {
       where: { storeId, shopifyOrderId: orderId },
       data: { bookingLockedAt: null },
     })
-    .catch(() => {});
+    .catch((err) => console.error("[booking] releaseLock failed for", orderId, ":", err.message));
 }
 
 // ── Public API ───────────────────────────────────────────────────────────────
@@ -307,6 +306,17 @@ export async function bookOrder({ admin, storeId, orderId, overrides: rawOverrid
 
   try {
     const destinationCity = await resolveCity(storeId, order.destinationCity);
+
+    // Give a specific, actionable message when the city is simply not in cache
+    // rather than the generic "Fix the order data" that provides no guidance.
+    if (!destinationCity && order.destinationCity) {
+      await releaseLock(storeId, orderId);
+      return {
+        ok: false,
+        message: `Destination city "${order.destinationCity}" not found in city list. Go to Settings → Refresh Cities and try again.`,
+      };
+    }
+
     const payload = buildPayload(order, settings, destinationCity, overrides);
     const validation = validateBookingPayload(payload);
 
@@ -327,7 +337,9 @@ export async function bookOrder({ admin, storeId, orderId, overrides: rawOverrid
         where: { storeId, shopifyOrderId: orderId },
         data: { lastError: result.message?.slice(0, 1000), bookingLockedAt: null },
       });
-      return result;
+      // Strip internal fields (raw, httpStatus, leopardStatus, code) before returning
+      // to the browser — only the user-facing message and fieldErrors are needed.
+      return { ok: false, message: result.message, fieldErrors: result.fieldErrors };
     }
 
     const booked = extractBookingData(result);
@@ -368,7 +380,12 @@ export async function bookOrder({ admin, storeId, orderId, overrides: rawOverrid
 
     // ── Shopify writeback (outside DB transaction — non-fatal if it fails) ──
     if (booked.trackNumber && settings.fulfillmentWritebackEnabled) {
-      await writebackFulfillment(admin, order.id, booked.trackNumber, booked.slipLink, order.note);
+      const writebackResult = await writebackFulfillment(admin, order.id, booked.trackNumber, booked.slipLink, order.note);
+      if (!writebackResult.fulfilled) {
+        await db.shipment
+          .updateMany({ where: { storeId, shopifyOrderId: orderId }, data: { writebackFailed: true } })
+          .catch((err) => console.error("[booking] writebackFailed flag update failed:", err.message));
+      }
     }
 
     return {
@@ -616,9 +633,15 @@ export async function bookOrdersBatch({ admin, storeId, orderIds }) {
       });
 
       if (trackNumber && settings.fulfillmentWritebackEnabled) {
-        writebackTasks.push(() =>
-          writebackFulfillment(admin, order.id, trackNumber, slipLink, order.note),
-        );
+        const taskOrderId = orderId;
+        writebackTasks.push(async () => {
+          const result = await writebackFulfillment(admin, order.id, trackNumber, slipLink, order.note);
+          if (!result.fulfilled) {
+            await db.shipment
+              .updateMany({ where: { storeId, shopifyOrderId: taskOrderId }, data: { writebackFailed: true } })
+              .catch((err) => console.error("[batch writeback] writebackFailed flag update failed:", err.message));
+          }
+        });
       }
 
       results.push({ orderId, orderName: order.name, cnNumber: trackNumber, ok: true, message: `Booked with CN ${trackNumber}` });

@@ -12,23 +12,10 @@ import {
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
 import { ensureStore } from "../services/store.server";
-import { getSettings, saveSettings, testConnection } from "../services/settings.server";
+import { getSettings, saveSettings, testConnection, isOnboardingComplete } from "../services/settings.server";
 import { getCityCacheStats, listOriginCities, refreshCities } from "../services/city.server";
 
 const TOTAL_STEPS = 6;
-
-function isOnboardingComplete(settings, cityStats) {
-  return Boolean(
-    settings.hasCredentials &&
-    settings.leopardEnvironment &&
-    cityStats.count > 0 &&
-    settings.originCityId &&
-    settings.shipperName &&
-    settings.shipperPhone &&
-    settings.shipperAddress &&
-    settings.defaultWeightGrams,
-  );
-}
 
 export const loader = async ({ request }) => {
   const { session } = await authenticate.admin(request);
@@ -36,17 +23,9 @@ export const loader = async ({ request }) => {
   const url = new URL(request.url);
   const step = Math.max(1, Math.min(TOTAL_STEPS, Number(url.searchParams.get("step") ?? 1)));
 
-  const t0 = performance.now();
   const settings = await getSettings(store.id);
-  console.log("[onboarding] getSettings", Math.round(performance.now() - t0), "ms");
-
-  const t1 = performance.now();
   const cityStats = await getCityCacheStats(store.id);
-  console.log("[onboarding] getCityCacheStats", Math.round(performance.now() - t1), "ms");
-
-  const t2 = performance.now();
   const originCities = step === 4 ? await listOriginCities(store.id) : [];
-  if (step === 4) console.log("[onboarding] listOriginCities", Math.round(performance.now() - t2), "ms");
 
   // Only redirect on step 1 (welcome screen). Steps 2–6 should never be
   // interrupted mid-flow, even if the merchant has already completed setup.
@@ -79,11 +58,6 @@ export const action = async ({ request }) => {
     const result = await saveSettings(store.id, formData);
     if (!result.ok) return result;
     return redirect("/app/onboarding?step=3");
-  }
-
-  if (intent === "next-step") {
-    const nextStep = parseInt(formData.get("nextStep") ?? "2", 10);
-    return redirect(`/app/onboarding?step=${nextStep}`);
   }
 
   if (intent === "save-shipper") {

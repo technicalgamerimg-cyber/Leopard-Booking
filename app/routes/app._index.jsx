@@ -4,7 +4,7 @@ import { redirect, useLoaderData, useRouteError } from "react-router";
 import { useAppBridge } from "@shopify/app-bridge-react";
 import { authenticate } from "../shopify.server";
 import { ensureStore } from "../services/store.server";
-import { getSettings } from "../services/settings.server";
+import { getSettings, isOnboardingComplete } from "../services/settings.server";
 import { getCityCacheStats } from "../services/city.server";
 import { getDashboard } from "../services/dashboard.server";
 
@@ -17,18 +17,7 @@ export const loader = async ({ request }) => {
     getCityCacheStats(store.id),
   ]);
 
-  const complete = Boolean(
-    settings.hasCredentials &&
-    settings.leopardEnvironment &&
-    cityStats.count > 0 &&
-    settings.originCityId &&
-    settings.shipperName &&
-    settings.shipperPhone &&
-    settings.shipperAddress &&
-    settings.defaultWeightGrams,
-  );
-
-  if (!complete) {
+  if (!isOnboardingComplete(settings, cityStats)) {
     const incomingUrl = new URL(request.url);
     const onboardingUrl = new URL("/app/onboarding", request.url);
     for (const [key, value] of incomingUrl.searchParams.entries()) {

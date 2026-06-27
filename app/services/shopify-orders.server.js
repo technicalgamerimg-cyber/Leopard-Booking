@@ -100,10 +100,11 @@ export function shapeOrder(order, shipment = null, defaultWeightGrams = 1000, co
     currency:      effectiveTotal?.currencyCode ?? "PKR",
     weightGrams:   defaultWeightGrams,
     note:          order.note ?? "",
-    bookingStatus: isCancelledShipment ? "PENDING" : shipment?.status ?? "PENDING",
-    cnNumber:      isCancelledShipment ? "" : shipment?.cnNumber ?? "",
-    slipLink:      isCancelledShipment ? "" : shipment?.slipLink ?? "",
-    lastError:     shipment?.lastError ?? "",
+    bookingStatus:  isCancelledShipment ? "PENDING" : shipment?.status ?? "PENDING",
+    cnNumber:       isCancelledShipment ? "" : shipment?.cnNumber ?? "",
+    slipLink:       isCancelledShipment ? "" : shipment?.slipLink ?? "",
+    lastError:      shipment?.lastError ?? "",
+    writebackFailed: !isCancelledShipment && Boolean(shipment?.writebackFailed),
   };
 }
 

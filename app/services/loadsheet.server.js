@@ -44,7 +44,7 @@ export async function generateLoadsheet(storeId, cnNumbers) {
   const client   = new LeopardApiClient({ storeId, settings });
   const result   = await client.generateLoadSheet(shipments.map((s) => s.cnNumber));
 
-  if (!result.ok) return result;
+  if (!result.ok) return { ok: false, message: result.message };
 
   const loadSheetId = String(extractLoadSheetId(result) ?? "");
   if (!loadSheetId) {
@@ -94,7 +94,7 @@ export async function downloadLoadsheet(storeId, loadSheetId) {
   const client   = new LeopardApiClient({ storeId, settings });
   const result   = await client.downloadLoadSheet(loadSheetId);
 
-  if (!result.ok) return result;
+  if (!result.ok) return { ok: false, message: result.message };
 
   await db.loadsheet.update({
     where: { id: loadsheet.id },

@@ -591,6 +591,9 @@ export default function Orders() {
                             <span className="lb-mono" style={{ fontSize: 12, color: "#444750" }}>{order.cnNumber}</span>
                           )}
                           <span style={{ fontSize: 11, color: "#8c9196" }}>CN number</span>
+                          {order.writebackFailed && (
+                            <span style={{ fontSize: 11, color: "#b7831a", fontWeight: 600 }}>⚠ Shopify sync failed</span>
+                          )}
                         </div>
                       ) : (
                         <div style={{ display: "flex", gap: 6, alignItems: "center" }}>

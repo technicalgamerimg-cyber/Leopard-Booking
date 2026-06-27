@@ -502,6 +502,9 @@ export default function Shipments() {
                               {shipment.lastError}
                             </div>
                           )}
+                          {shipment.writebackFailed && shipment.status === "BOOKED" && (
+                            <div style={{ fontSize: 11, color: "#b7831a", marginTop: 3, fontWeight: 600 }}>⚠ Shopify sync failed</div>
+                          )}
                         </div>
                       </s-table-cell>
 

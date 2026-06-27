@@ -1,5 +1,14 @@
 import crypto from "node:crypto";
 
+// Validate at module load time so a missing key surfaces on cold start,
+// not silently on the first request that touches credentials.
+if (process.env.NODE_ENV === "production" && !process.env.ENCRYPTION_KEY) {
+  throw new Error(
+    "ENCRYPTION_KEY environment variable is required in production. " +
+      "Generate one with: node -e \"console.log(require('crypto').randomBytes(32).toString('base64'))\"",
+  );
+}
+
 const ALGORITHM = "aes-256-gcm";
 
 function getKey() {
