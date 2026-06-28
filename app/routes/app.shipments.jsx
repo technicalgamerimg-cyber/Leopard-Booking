@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import {
-  Form, useFetcher, useLoaderData, useNavigation, useRevalidator, useRouteError,
+  Form, Link, useFetcher, useLoaderData, useNavigation, useRevalidator, useRouteError,
 } from "react-router";
 import { useAppBridge } from "@shopify/app-bridge-react";
 import { boundary } from "@shopify/shopify-app-react-router/server";
@@ -13,7 +13,7 @@ import {
 import { batchResolveCityNames } from "../services/city.server";
 import db from "../db.server";
 
-const ALL_STATUSES = ["PENDING", "BOOKED", "IN_TRANSIT", "DELIVERED", "RETURNED", "CANCELLED", "EXCEPTION"];
+const ALL_STATUSES = ["BOOKED", "IN_TRANSIT", "DELIVERED", "RETURNED"];
 
 const STATUS_STYLES = {
   PENDING:    { dot: "#e8912d", bg: "#fff5ea", text: "#8a4b00",  label: "Not booked" },
@@ -48,10 +48,11 @@ export const loader = async ({ request }) => {
     db.shipment.groupBy({ by: ["status"], where: { storeId: store.id }, _count: { _all: true } }),
   ]);
 
+  const VISIBLE = new Set(["BOOKED", "IN_TRANSIT", "DELIVERED", "RETURNED"]);
   const statusCounts = { ALL: 0 };
   for (const row of statusCountRows) {
     statusCounts[row.status] = row._count._all;
-    statusCounts.ALL += row._count._all;
+    if (VISIBLE.has(row.status)) statusCounts.ALL += row._count._all;
   }
 
   const cityIdList = [];
@@ -216,8 +217,6 @@ export default function Shipments() {
   const selectableShipments   = shipments.filter((s) => s.cnNumber && !TERMINAL_STATUSES.includes(s.status));
   const allSelectableSelected = selectableShipments.length > 0 && selectableShipments.every((s) => selectedCns.has(s.cnNumber));
 
-  // ── CSV export: native <a> with download attribute for reliable cross-browser download
-  const exportHref = `/app/shipments/export?${new URLSearchParams({ ...(status ? { status } : {}), ...(query ? { query } : {}) })}`;
   const startCount = total === 0 ? 0 : (page - 1) * perPage + 1;
   const endCount   = Math.min(page * perPage, total);
 
@@ -266,9 +265,9 @@ export default function Shipments() {
             const isActive = status === key;
             const style    = STATUS_STYLES[key];
             return (
-              <a
+              <Link
                 key={key}
-                href={`/app/shipments?${buildPageQuery({ status: key, query, page: 1 })}`}
+                to={`/app/shipments?${buildPageQuery({ status: key, query, page: 1 })}`}
                 className={`lb-tab${isActive ? " lb-tab-active" : ""}`}
                 style={{
                   background:  isActive ? (style?.bg ?? "#f0f0ff") : "#f6f6f7",
@@ -289,12 +288,12 @@ export default function Shipments() {
                     {count}
                   </span>
                 )}
-              </a>
+              </Link>
             );
           })}
         </div>
 
-        {/* Search + export row */}
+        {/* Search row */}
         <Form method="get" style={{ display: "contents" }}>
           <input type="hidden" name="status" value={status} />
           <div style={{ display: "flex", gap: 10, alignItems: "flex-end", flexWrap: "wrap" }}>
@@ -303,13 +302,6 @@ export default function Shipments() {
             </div>
             <s-button type="submit">Search</s-button>
             {(status || query) && <s-button href="/app/shipments">Clear</s-button>}
-            {/* 
-              Native <a> with download attribute — reliably triggers browser file download
-              across all browsers (unlike <s-button href> which may navigate instead)
-            */}
-            <a href={exportHref} download className="lb-export-btn">
-              ↓ Export CSV
-            </a>
           </div>
         </Form>
       </s-section>
@@ -420,9 +412,9 @@ export default function Shipments() {
               {!status && !query && "Booked orders will appear here."}
             </div>
             {(status || query) && (
-              <a href="/app/shipments" className="lb-btn lb-btn-primary" style={{ display: "inline-flex", marginTop: 16 }}>
+              <Link to="/app/shipments" className="lb-btn lb-btn-primary" style={{ display: "inline-flex", marginTop: 16 }}>
                 Clear filters
-              </a>
+              </Link>
             )}
           </div>
         ) : (

@@ -341,10 +341,14 @@ export async function refreshShipmentStatusesByDateRange(storeId, fromDate, toDa
 
 // ── Internal helpers ──────────────────────────────────────────────────────────
 
+const VISIBLE_STATUSES = ["BOOKED", "IN_TRANSIT", "DELIVERED", "RETURNED"];
+
 function buildWhere(storeId, status, query) {
   return {
     storeId,
-    ...(status ? { status } : {}),
+    status: status && VISIBLE_STATUSES.includes(status)
+      ? status
+      : { in: VISIBLE_STATUSES },
     ...(query
       ? {
           OR: [
