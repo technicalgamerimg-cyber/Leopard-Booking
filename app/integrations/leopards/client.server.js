@@ -91,8 +91,8 @@ function safeParseJson(text, httpStatus, contentType = "", endpoint = "") {
         ok: false,
         code: "LEOPARDS_INVALID_RESPONSE",
         message:
-          "Leopards API returned an unexpected response instead of JSON. " +
-          "This usually indicates a temporary API issue, authentication problem, or an upstream proxy error.",
+          `Leopards API returned a non-JSON response (HTTP ${httpStatus ?? "unknown"}). ` +
+          "Check Settings → Test connection. If that passes, the batch endpoint may be unavailable for your account.",
         httpStatus,
         leopardStatus: null,
       },
