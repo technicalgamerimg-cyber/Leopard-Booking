@@ -529,6 +529,43 @@ export async function bookOrdersBatch({ admin, storeId, orderIds }) {
   const lockTs = new Date();
   const lockExpiry = new Date(Date.now() - LOCK_TIMEOUT_MS);
 
+  // Determine which toFetch orders have no DB record at all.
+  // Cannot use alreadyActiveByOrderId for this — it excludes CANCELLED records,
+  // so CANCELLED orders would appear absent from that map even though they have rows.
+  // Separate from alreadyActiveByOrderId (which excludes CANCELLED) so we know
+  // exactly which orders have no DB row regardless of status.
+  const existingRecordIds = new Set(
+    (await db.shipment.findMany({
+      where: { storeId, shopifyOrderId: { in: toFetch } },
+      select: { shopifyOrderId: true },
+    })).map((s) => s.shopifyOrderId),
+  );
+  const noRecordIds = toFetch.filter((id) => !existingRecordIds.has(id));
+
+  if (noRecordIds.length > 0) {
+    // Seed DB records for orders the orders/create webhook hasn't processed yet.
+    // Keep the seeded fields in sync with acquireBookingLock().
+    // Any required Shipment field added there should also be added here.
+    // shopifyOrderName is a temporary placeholder — the BOOKED transaction
+    // overwrites it with the real Shopify order name (e.g. "#1732").
+    const created = await db.shipment.createMany({
+      data: noRecordIds.map((id) => ({
+        storeId,
+        shopifyOrderId:   id,
+        shopifyOrderName: `#${id.split("/").pop()}`, // temporary; overwritten in BOOKED tx
+        weightGrams:      settings.defaultWeightGrams,
+        consigneeName:    "Unknown",
+        consigneePhone:   "",
+        consigneeAddress: "",
+        bookingLockedAt:  lockTs,
+      })),
+      skipDuplicates: true,
+    });
+    console.debug(`[bulk booking] seeded ${created.count} placeholder shipment records`, {
+      attempted: noRecordIds.length,
+    });
+  }
+
   await db.shipment.updateMany({
     where: {
       storeId,
@@ -564,6 +601,8 @@ export async function bookOrdersBatch({ admin, storeId, orderIds }) {
   }
 
   // ── 3. Fetch Shopify orders + resolve cities in parallel ─────────────────────
+  // TODO: wrap in try/catch to release all toBatch locks on unexpected exception.
+  // Currently, an unhandled throw here holds all locks until LOCK_TIMEOUT_MS expiry.
   const fetchedOrders = await Promise.all(
     toBatch.map((orderId) =>
       getOrder({ admin, storeId, orderId, defaultWeightGrams: settings.defaultWeightGrams, codKeywords }),
@@ -683,6 +722,7 @@ export async function bookOrdersBatch({ admin, storeId, orderIds }) {
               cnNumber:            trackNumber,
               slipLink:            slipLink ?? null,
               bookedPacketOrderId: item?.booked_packet_order_id || order.name,
+              shopifyOrderName:    order.name,
               status:              "BOOKED",
               codAmount:           chunkPackets[i].booked_packet_collect_amount,
               weightGrams:         chunkPackets[i].booked_packet_weight,
