@@ -20,6 +20,9 @@ const FULFILLMENT_ORDERS_QUERY = `#graphql
           id
           status
           supportedActions { action }
+          fulfillments(first: 1) {
+            nodes { id }
+          }
         }
       }
     }
@@ -34,6 +37,22 @@ const FULFILLMENT_CREATE_MUTATION = `#graphql
         status
         trackingInfo { number url company }
       }
+      userErrors { field message }
+    }
+  }
+`;
+
+const FULFILLMENT_TRACKING_UPDATE_MUTATION = `#graphql
+  mutation FulfillmentTrackingInfoUpdate(
+    $fulfillmentId: ID!
+    $trackingInfoInput: FulfillmentTrackingInput!
+  ) {
+    fulfillmentTrackingInfoUpdate(
+      fulfillmentId: $fulfillmentId
+      trackingInfoInput: $trackingInfoInput
+      notifyCustomer: false
+    ) {
+      fulfillment { id trackingInfo { number url company } }
       userErrors { field message }
     }
   }
@@ -91,6 +110,55 @@ async function writebackFulfillment(admin, orderId, cnNumber, slipLink, existing
       ) ?? fulfillmentOrders.find((fo) => fo.status === "OPEN");
 
     if (!openFo) {
+      const allClosed =
+        fulfillmentOrders.length > 0 &&
+        fulfillmentOrders.every((fo) => fo.status === "CLOSED");
+
+      if (allClosed) {
+        // Order is already fulfilled in Shopify — not a failure.
+        // Attempt to attach tracking when there is exactly one FO (unambiguous target).
+        // Multiple FOs are skipped to avoid updating the wrong fulfillment.
+        if (fulfillmentOrders.length === 1) {
+          const existingFulfillmentId = fulfillmentOrders[0]?.fulfillments?.nodes?.[0]?.id;
+          if (existingFulfillmentId) {
+            try {
+              const updateResponse = await admin.graphql(FULFILLMENT_TRACKING_UPDATE_MUTATION, {
+                variables: {
+                  fulfillmentId: existingFulfillmentId,
+                  trackingInfoInput: {
+                    number:  cnNumber,
+                    url:     slipLink || `https://leopardscourier.com/track?cn=${cnNumber}`,
+                    company: "Leopards Courier",
+                  },
+                },
+              });
+              const updateJson   = await updateResponse.json();
+              const updateErrors = updateJson.data?.fulfillmentTrackingInfoUpdate?.userErrors ?? [];
+              if (updateErrors.length) {
+                console.warn("[fulfillment writeback] tracking update userErrors (non-fatal)", {
+                  orderId, cnNumber, updateErrors,
+                });
+              } else {
+                console.log("[fulfillment writeback] tracking updated on existing fulfillment", {
+                  orderId, fulfillmentId: existingFulfillmentId,
+                });
+                await writeOrderNote(admin, orderId, cnNumber, existingNote);
+              }
+            } catch (err) {
+              console.warn("[fulfillment writeback] tracking update threw (non-fatal)", {
+                orderId, error: err.message,
+              });
+            }
+          }
+        } else {
+          console.log("[fulfillment writeback] multiple CLOSED FOs — skipping tracking update to avoid attaching to wrong fulfillment", {
+            orderId, foCount: fulfillmentOrders.length,
+          });
+        }
+
+        return { fulfilled: true };
+      }
+
       const reason = "No open fulfillment order found";
       console.warn("[fulfillment writeback] no fulfillable order found", {
         orderId,
