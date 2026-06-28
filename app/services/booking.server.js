@@ -91,8 +91,14 @@ async function writebackFulfillment(admin, orderId, cnNumber, slipLink, existing
       ) ?? fulfillmentOrders.find((fo) => fo.status === "OPEN");
 
     if (!openFo) {
-      console.warn(`[fulfillment writeback] No fulfillable order for ${orderId}`);
-      return { fulfilled: false };
+      const reason = "No open fulfillment order found";
+      console.warn("[fulfillment writeback] no fulfillable order found", {
+        orderId,
+        fulfillmentOrders: fulfillmentOrders.map((fo) => ({
+          id: fo.id, status: fo.status, supportedActions: fo.supportedActions,
+        })),
+      });
+      return { fulfilled: false, reason };
     }
 
     const createResponse = await admin.graphql(FULFILLMENT_CREATE_MUTATION, {
@@ -112,15 +118,18 @@ async function writebackFulfillment(admin, orderId, cnNumber, slipLink, existing
     const createJson = await createResponse.json();
     const errors = createJson.data?.fulfillmentCreate?.userErrors ?? [];
     if (errors.length) {
-      console.error("[fulfillment writeback] fulfillmentCreate errors:", JSON.stringify(errors));
-      return { fulfilled: false };
+      const reason = errors.map((e) => `${e.field}: ${e.message}`).join("; ");
+      console.error("[fulfillment writeback] fulfillmentCreate userErrors", {
+        orderId, cnNumber, errors,
+      });
+      return { fulfilled: false, reason };
     }
 
     await writeOrderNote(admin, orderId, cnNumber, existingNote);
     return { fulfilled: true };
   } catch (err) {
     console.error("[fulfillment writeback] Unexpected error:", err);
-    return { fulfilled: false };
+    return { fulfilled: false, reason: err.message };
   }
 }
 
@@ -666,5 +675,76 @@ export async function bookOrdersBatch({ admin, storeId, orderIds }) {
       ? `${successes} order(s) booked successfully.`
       : `${successes} booked, ${failures} failed.`,
     results,
+  };
+}
+
+export async function retryWriteback({ admin, storeId, orderId }) {
+  // Guard 1: DB flag — cheap early exit if another process already cleared it
+  const shipment = await db.shipment.findUnique({
+    where: { storeId_shopifyOrderId: { storeId, shopifyOrderId: orderId } },
+    select: { cnNumber: true, slipLink: true, writebackFailed: true },
+  });
+
+  if (!shipment?.cnNumber) {
+    return { ok: false, message: "No CN number found for this order." };
+  }
+  if (!shipment.writebackFailed) {
+    return { ok: true, message: "Sync already succeeded — nothing to retry." };
+  }
+
+  // Guard 2: Shopify state — explicit check for existing fulfillment so the
+  // retry is idempotent even when the DB flag is stale (race condition where
+  // Shopify already created the fulfillment but the webhook hasn't cleared the flag yet).
+  const foResponse = await admin.graphql(
+    `#graphql
+      query CheckFulfillmentState($id: ID!) {
+        order(id: $id) {
+          note
+          fulfillmentOrders(first: 5) {
+            nodes { id status supportedActions { action } }
+          }
+        }
+      }
+    `,
+    { variables: { id: orderId } },
+  );
+  const foJson            = await foResponse.json();
+  const existingNote      = foJson.data?.order?.note ?? "";
+  const fulfillmentOrders = foJson.data?.order?.fulfillmentOrders?.nodes ?? [];
+
+  const hasOpenFo = fulfillmentOrders.some((fo) =>
+    fo.supportedActions?.some((a) => a.action === "CREATE_FULFILLMENT"),
+  );
+  const alreadyFulfilled =
+    fulfillmentOrders.length > 0 && fulfillmentOrders.every((fo) => fo.status === "CLOSED");
+
+  if (alreadyFulfilled) {
+    // Shopify already has a fulfillment — clear our stale flag and return success
+    await db.shipment
+      .updateMany({ where: { storeId, shopifyOrderId: orderId }, data: { writebackFailed: false } })
+      .catch((err) => console.error("[retryWriteback] flag clear failed:", err.message));
+    return { ok: true, message: "Shopify fulfillment already exists — sync flag cleared." };
+  }
+
+  if (!hasOpenFo) {
+    return { ok: false, message: "No open fulfillment order found in Shopify for this order." };
+  }
+
+  const result = await writebackFulfillment(
+    admin, orderId, shipment.cnNumber, shipment.slipLink, existingNote,
+  );
+
+  if (result.fulfilled) {
+    await db.shipment
+      .updateMany({ where: { storeId, shopifyOrderId: orderId }, data: { writebackFailed: false } })
+      .catch((err) => console.error("[retryWriteback] flag clear failed:", err.message));
+    return { ok: true, message: "Shopify sync succeeded." };
+  }
+
+  return {
+    ok:      false,
+    message: result.reason
+      ? `Shopify sync failed: ${result.reason}`
+      : "Shopify sync failed again. Check server logs for the specific error.",
   };
 }

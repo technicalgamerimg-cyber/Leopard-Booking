@@ -6,7 +6,7 @@ import { authenticate } from "../shopify.server";
 import { ensureStore } from "../services/store.server";
 import { getSettings, getCodKeywords } from "../services/settings.server";
 import { listOrders } from "../services/shopify-orders.server";
-import { bookOrder, bookOrdersBatch } from "../services/booking.server";
+import { bookOrder, bookOrdersBatch, retryWriteback } from "../services/booking.server";
 
 // ── Design tokens (match globals.css) ────────────────────────────────────────
 
@@ -268,6 +268,10 @@ export const action = async ({ request }) => {
     if (!orderIds.length) return { ok: false, message: "No orders selected." };
     if (orderIds.length > 1000) return { ok: false, message: "Too many orders selected (max 1000)." };
     return bookOrdersBatch({ admin, storeId: store.id, orderIds });
+  }
+
+  if (intent === "retrySync") {
+    return retryWriteback({ admin, storeId: store.id, orderId: formData.get("orderId") });
   }
 
   return bookOrder({
@@ -611,7 +615,26 @@ export default function Orders() {
                           )}
                           <span style={{ fontSize: 11, color: "#8c9196" }}>CN number</span>
                           {order.writebackFailed && (
-                            <span style={{ fontSize: 11, color: "#b7831a", fontWeight: 600 }}>⚠ Shopify sync failed</span>
+                            <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 2 }}>
+                              <span style={{ fontSize: 11, color: "#b7831a", fontWeight: 600 }}>⚠ Sync failed</span>
+                              <s-button
+                                size="slim"
+                                loading={
+                                  fetcher.state !== "idle" &&
+                                  fetcher.formData?.get("intent") === "retrySync" &&
+                                  fetcher.formData?.get("orderId") === order.id
+                                }
+                                disabled={anyBookingInFlight}
+                                onClick={() =>
+                                  fetcher.submit(
+                                    { intent: "retrySync", orderId: order.id },
+                                    { method: "post", action: "/app/orders" },
+                                  )
+                                }
+                              >
+                                Retry
+                              </s-button>
+                            </div>
                           )}
                         </div>
                       ) : (
