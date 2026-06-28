@@ -138,7 +138,7 @@ export default function Loadsheets() {
     <s-page heading="Loadsheets">
 
       {/* ── Generate section ── */}
-      <s-section heading="Generate loadsheet">
+      <s-section heading="Generate loadsheet And labels">
         {eligibleShipments.length === 0 ? (
           <div className="lb-empty">
             <span className="lb-empty-icon">📋</span>
@@ -192,7 +192,7 @@ export default function Loadsheets() {
                   loading={busy}
                 >
                   {busy
-                    ? "Generating load sheet…"
+                    ? "Generating load sheet And Labels…"
                     : `Generate load sheet for ${selectedCns.size} shipment${selectedCns.size !== 1 ? "s" : ""}`}
                 </s-button>
               </div>

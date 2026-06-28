@@ -105,7 +105,11 @@ export const action = async ({ request }) => {
       },
     });
 
-    return { ok: true, message: `Load sheet generated (ID: ${loadSheetId}).`, intent };
+    return {
+      ok:      true,
+      message: `Load sheet generated for ${cnNumbers.length} shipment${cnNumbers.length !== 1 ? "s" : ""}. Download the PDF from the history section above.`,
+      intent,
+    };
   }
 
   if (intent === "downloadLoadsheet") {
@@ -327,12 +331,37 @@ export default function Shipments() {
         />
       )}
 
+      {/* ── Workflow hint ── */}
+      <s-section>
+        <div style={{
+          background:   "#f0f7ff",
+          border:       "1px solid #b5d4f5",
+          borderRadius: 8,
+          padding:      "12px 16px",
+          fontSize:     13,
+          color:        "#0d3880",
+          lineHeight:   1.6,
+        }}>
+          <strong>How to use this page:</strong>
+          {" "}Tick the checkboxes next to booked shipments, then click
+          {" "}<strong>Generate Labels &amp; Load Sheet</strong> to create a consolidated load sheet PDF
+          (containing all selected shipment labels) ready for the Leopards Courier rider.
+          Use the <strong>Download Label</strong> button on any row to download a single shipment label.
+          Generated load sheets appear in the <strong>history section below</strong> and can be re-downloaded for up to 24 hours.
+        </div>
+      </s-section>
+
       {/* ── Load Sheet History (last 24 h) ── */}
       {recentLoadsheets.length > 0 && (
         <s-section>
           <div className="lb-card">
             <div className="lb-card-header">
-              <span className="lb-section-label">Load Sheet History (last 24 hours)</span>
+              <div>
+                <span className="lb-section-label">Load Sheet History</span>
+                <div style={{ fontSize: 12, color: "#6d7175", marginTop: 2 }}>
+                  Load sheets generated in the last 24 hours — click <strong>Download PDF</strong> to re-download any time.
+                </div>
+              </div>
             </div>
             <div className="lb-card-body">
               <s-table>
@@ -401,8 +430,13 @@ export default function Shipments() {
             gap:          12,
             flexWrap:     "wrap",
           }}>
-            <div style={{ fontWeight: 600, fontSize: 14, color: "#0d3880", flex: 1 }}>
-              {selectedCns.size} shipment{selectedCns.size !== 1 ? "s" : ""} selected
+            <div style={{ flex: 1 }}>
+              <div style={{ fontWeight: 600, fontSize: 14, color: "#0d3880" }}>
+                {selectedCns.size} shipment{selectedCns.size !== 1 ? "s" : ""} selected
+              </div>
+              <div style={{ fontSize: 12, color: "#4a6fa8", marginTop: 2 }}>
+                Generate a load sheet PDF with all selected shipment labels for courier pickup
+              </div>
             </div>
             <s-button
               variant="primary"
@@ -413,7 +447,7 @@ export default function Shipments() {
                 { method: "post", action: "/app/shipments" },
               )}
             >
-              Generate Load Sheet
+              Generate Labels &amp; Load Sheet
             </s-button>
             <s-button
               tone="critical"
@@ -562,7 +596,7 @@ export default function Shipments() {
                       <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
                         <s-button href={`/app/shipments/${shipment.id}`}>View</s-button>
                         {shipment.slipLink && (
-                          <s-button href={shipment.slipLink} target="_blank">Label</s-button>
+                          <s-button href={shipment.slipLink} target="_blank">Download Label</s-button>
                         )}
                         {shipment.cnNumber && (
                           <s-button

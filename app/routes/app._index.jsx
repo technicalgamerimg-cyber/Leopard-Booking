@@ -1,5 +1,5 @@
 import { boundary } from "@shopify/shopify-app-react-router/server";
-import { redirect, useLoaderData, useRouteError } from "react-router";
+import { Link, redirect, useLoaderData, useRouteError } from "react-router";
 import { authenticate } from "../shopify.server";
 import { ensureStore } from "../services/store.server";
 import { getSettings, isOnboardingComplete } from "../services/settings.server";
@@ -76,15 +76,15 @@ function MetricCard({ label, value, color, sublabel, href }) {
     </div>
   );
   return href
-    ? <a href={href} style={{ textDecoration: "none", display: "block" }}>{inner}</a>
+    ? <Link to={href} style={{ textDecoration: "none", display: "block" }}>{inner}</Link>
     : inner;
 }
 
 function QuickActionBtn({ href, children, primary }) {
   return (
-    <a href={href} className={`lb-quick-action${primary ? " lb-quick-action-primary" : ""}`}>
+    <Link to={href} className={`lb-quick-action${primary ? " lb-quick-action-primary" : ""}`}>
       {children}
-    </a>
+    </Link>
   );
 }
 
@@ -126,14 +126,14 @@ export default function Dashboard() {
             </div>
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
               {(awaitingBooking > 0 || failedBookings > 0) && (
-                <a href="/app/orders" style={{ padding: "7px 14px", background: "#d72c0d", color: "#fff", borderRadius: 6, fontSize: 13, fontWeight: 600, textDecoration: "none" }}>
+                <Link to="/app/orders" style={{ padding: "7px 14px", background: "#d72c0d", color: "#fff", borderRadius: 6, fontSize: 13, fontWeight: 600, textDecoration: "none" }}>
                   Book now →
-                </a>
+                </Link>
               )}
               {counts.EXCEPTION > 0 && (
-                <a href="/app/shipments?status=EXCEPTION" style={{ padding: "7px 14px", background: "#fff", color: "#d72c0d", border: "1px solid #d72c0d", borderRadius: 6, fontSize: 13, fontWeight: 600, textDecoration: "none" }}>
-                  View exceptions
-                </a>
+                <Link to="/app/orders" style={{ padding: "7px 14px", background: "#fff", color: "#d72c0d", border: "1px solid #d72c0d", borderRadius: 6, fontSize: 13, fontWeight: 600, textDecoration: "none" }}>
+                  Go to Orders
+                </Link>
               )}
             </div>
           </div>
@@ -143,9 +143,9 @@ export default function Dashboard() {
       {/* ── Primary KPI row ── */}
       <s-section heading="Today's performance">
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", gap: 12 }}>
-          <MetricCard label="Booked today" value={bookedToday} color="#3d8b40" sublabel="new bookings" href="/app/shipments?status=BOOKED" />
-          <MetricCard label="In transit" value={inFlightCount} color="#5c6ac4" sublabel="active shipments" href="/app/shipments?status=IN_TRANSIT" />
-          <MetricCard label="Delivered" value={counts.DELIVERED} color="#3d8b40" sublabel="all time" href="/app/shipments?status=DELIVERED" />
+          <MetricCard label="Booked today" value={bookedToday} color="#3d8b40" sublabel="new bookings" href="/app/shipments" />
+          <MetricCard label="In transit" value={inFlightCount} color="#5c6ac4" sublabel="active shipments" />
+          <MetricCard label="Delivered" value={counts.DELIVERED} color="#3d8b40" sublabel="all time" />
           <MetricCard
             label="Need booking"
             value={(awaitingBooking ?? 0) + (failedBookings ?? 0)}
@@ -160,9 +160,9 @@ export default function Dashboard() {
       <s-section heading="All-time breakdown">
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(130px, 1fr))", gap: 10 }}>
           <MetricCard label="Total" value={counts.total} color="#5c6ac4" />
-          <MetricCard label="Returned" value={counts.RETURNED} color="#e8912d" href="/app/shipments?status=RETURNED" />
-          <MetricCard label="Cancelled" value={counts.CANCELLED} color="#8c9196" href="/app/shipments?status=CANCELLED" />
-          <MetricCard label="Exceptions" value={counts.EXCEPTION} color={counts.EXCEPTION > 0 ? "#d72c0d" : "#8c9196"} href="/app/shipments?status=EXCEPTION" />
+          <MetricCard label="Returned" value={counts.RETURNED} color="#e8912d" />
+          <MetricCard label="Cancelled" value={counts.CANCELLED} color="#8c9196" />
+          <MetricCard label="Exceptions" value={counts.EXCEPTION} color={counts.EXCEPTION > 0 ? "#d72c0d" : "#8c9196"} />
         </div>
       </s-section>
 
@@ -246,9 +246,9 @@ export default function Dashboard() {
               );
             })}
             <div style={{ padding: "10px 16px", background: "var(--lb-surface-muted)", borderTop: "1px solid var(--lb-border)" }}>
-              <a href="/app/shipments" style={{ fontSize: 13, color: "var(--lb-primary)", fontWeight: 600, textDecoration: "none" }}>
-                View all shipments →
-              </a>
+              <Link to="/app/shipments" style={{ fontSize: 13, color: "var(--lb-primary)", fontWeight: 600, textDecoration: "none" }}>
+                View booked shipments →
+              </Link>
             </div>
           </div>
         ) : (
@@ -258,9 +258,9 @@ export default function Dashboard() {
             <div className="lb-empty-desc" style={{ marginBottom: 16 }}>
               Book your first order to see activity here.
             </div>
-            <a href="/app/orders" className="lb-btn lb-btn-primary">
+            <Link to="/app/orders" className="lb-btn lb-btn-primary">
               Book an order
-            </a>
+            </Link>
           </div>
         )}
       </s-section>
