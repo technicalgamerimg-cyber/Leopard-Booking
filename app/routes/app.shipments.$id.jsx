@@ -71,7 +71,7 @@ export const action = async ({ request, params }) => {
 
   if (!cn) return { ok: false, message: "Shipment has no CN number." };
   if (intent === "refresh") return refreshShipmentStatuses(store.id, [cn]);
-  if (intent === "cancel")  return cancelShipments(store.id, [cn], admin);
+  if (intent === "cancel")  return cancelShipments(store.id, [cn], admin, { resetToPending: true });
 
   return { ok: false, message: "Unknown action." };
 };

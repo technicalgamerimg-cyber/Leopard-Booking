@@ -185,7 +185,7 @@ export async function cancelFulfillmentInShopify(admin, shopifyOrderId) {
  *                              called from a webhook context), Shopify writeback is
  *                              skipped.
  */
-export async function cancelShipments(storeId, cnNumbers, admin = null) {
+export async function cancelShipments(storeId, cnNumbers, admin = null, { resetToPending = false } = {}) {
   if (!cnNumbers?.length) {
     return { ok: false, message: "No CN numbers provided." };
   }
@@ -226,10 +226,8 @@ export async function cancelShipments(storeId, cnNumbers, admin = null) {
   const ids = cancellableShipments.map((s) => s.id);
   const now = new Date();
 
-  await db.$transaction([
-    db.shipment.updateMany({
-      where: { id: { in: ids } },
-      data:  {
+  const cancelData = resetToPending
+    ? {
         status:            "PENDING",
         cnNumber:          null,
         slipLink:          null,
@@ -238,15 +236,23 @@ export async function cancelShipments(storeId, cnNumbers, admin = null) {
         lastError:         null,
         shopifySyncStatus: "SYNC_OK",
         ourFulfillmentId:  null,
-      },
+      }
+    : { status: "CANCELLED", cancelledAt: now, lastError: null };
+
+  await db.$transaction([
+    db.shipment.updateMany({
+      where: { id: { in: ids } },
+      data:  cancelData,
     }),
     db.shipmentLog.createMany({
       data: cancellableShipments.map((s) => ({
         shipmentId: s.id,
         eventType:  "CANCELLED",
         fromStatus: s.status,
-        toStatus:   "PENDING",
-        message:    "Cancelled via Leopards — reset to pending for re-booking",
+        toStatus:   resetToPending ? "PENDING" : "CANCELLED",
+        message:    resetToPending
+          ? "Cancelled via Leopards — reset to pending for re-booking"
+          : "Cancelled through Leopards",
       })),
     }),
   ]);

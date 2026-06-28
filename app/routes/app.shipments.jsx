@@ -159,7 +159,7 @@ export const action = async ({ request }) => {
   if (intent === "cancel" || intent === "cancelBatch") {
     const cnNumbers = String(formData.get("cnNumbers") ?? "")
       .split(",").map((v) => v.trim()).filter(Boolean);
-    return { ...await cancelShipments(store.id, cnNumbers, admin), intent };
+    return { ...await cancelShipments(store.id, cnNumbers, admin, { resetToPending: true }), intent };
   }
 
   if (intent === "restoreFulfillment") {
@@ -170,7 +170,7 @@ export const action = async ({ request }) => {
   if (intent === "cancelBroken") {
     const cnNumbers = String(formData.get("cnNumbers") ?? "")
       .split(",").map((v) => v.trim()).filter(Boolean);
-    const result = await cancelShipments(store.id, cnNumbers, admin);
+    const result = await cancelShipments(store.id, cnNumbers, admin, { resetToPending: true });
     return { ...result, intent };
   }
 

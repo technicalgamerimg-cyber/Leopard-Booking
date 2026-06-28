@@ -90,9 +90,13 @@ async function writebackFulfillment(admin, orderId, cnNumber, slipLink) {
       ) ?? fulfillmentOrders.find((fo) => fo.status === "OPEN");
 
     if (!openFo) {
-      const allClosed =
-        fulfillmentOrders.length > 0 &&
-        fulfillmentOrders.every((fo) => fo.status === "CLOSED");
+      // No fulfillment orders at all — digital product, refunded, or not shippable
+      if (fulfillmentOrders.length === 0) {
+        console.log("[fulfillment writeback] no fulfillment orders — order does not require physical fulfillment", { orderId });
+        return { fulfilled: true, fulfillmentId: null };
+      }
+
+      const allClosed = fulfillmentOrders.every((fo) => fo.status === "CLOSED");
 
       if (allClosed) {
         // Already fulfilled — attempt to attach tracking when there is exactly one FO.
