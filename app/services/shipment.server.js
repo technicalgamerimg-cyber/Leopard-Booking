@@ -229,15 +229,24 @@ export async function cancelShipments(storeId, cnNumbers, admin = null) {
   await db.$transaction([
     db.shipment.updateMany({
       where: { id: { in: ids } },
-      data:  { status: "CANCELLED", cancelledAt: now, lastError: null },
+      data:  {
+        status:            "PENDING",
+        cnNumber:          null,
+        slipLink:          null,
+        bookedAt:          null,
+        cancelledAt:       now,
+        lastError:         null,
+        shopifySyncStatus: "SYNC_OK",
+        ourFulfillmentId:  null,
+      },
     }),
     db.shipmentLog.createMany({
       data: cancellableShipments.map((s) => ({
         shipmentId: s.id,
         eventType:  "CANCELLED",
         fromStatus: s.status,
-        toStatus:   "CANCELLED",
-        message:    "Cancelled through Leopards",
+        toStatus:   "PENDING",
+        message:    "Cancelled via Leopards — reset to pending for re-booking",
       })),
     }),
   ]);

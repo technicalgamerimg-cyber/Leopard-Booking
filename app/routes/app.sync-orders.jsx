@@ -1,3 +1,4 @@
+import { redirect } from "react-router";
 import { authenticate } from "../shopify.server";
 import { ensureStore } from "../services/store.server";
 import db from "../db.server";
@@ -31,13 +32,9 @@ const SYNC_ORDERS_QUERY = `#graphql
   }
 `;
 
-// Only GET is supported for this loader — the action handles the sync trigger.
 export const loader = async ({ request }) => {
-  const { session } = await authenticate.admin(request);
-  const store = await ensureStore(session);
-  return {
-    lastOrderSyncCursor: store.lastOrderSyncCursor ?? null,
-  };
+  await authenticate.admin(request);
+  return redirect("/app/orders");
 };
 
 export const action = async ({ request }) => {

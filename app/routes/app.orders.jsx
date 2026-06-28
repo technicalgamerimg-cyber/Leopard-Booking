@@ -400,6 +400,7 @@ export default function Orders() {
   } = useLoaderData();
 
   const fetcher     = useFetcher();
+  const syncFetcher = useFetcher({ key: "sync-orders" });
   const navigation  = useNavigation();
   const shopify     = useAppBridge();
   const revalidator = useRevalidator();
@@ -413,6 +414,10 @@ export default function Orders() {
   const [fieldErrors,         setFieldErrors]          = useState(null);
   const [batchResults,        setBatchResults]         = useState(null);
   const prevFetcherData = useRef(null);
+  const syncedCountRef  = useRef(0);
+  const prevSyncData    = useRef(null);
+
+  const isSyncing = syncFetcher.state !== "idle";
 
   const loading            = navigation.state === "loading";
   const anyBookingInFlight = fetcher.state !== "idle";
@@ -442,6 +447,30 @@ export default function Orders() {
       revalidator.revalidate();
     }
   }, [fetcher.data, fetcher.formData, shopify]);
+
+  useEffect(() => {
+    if (!syncFetcher.data || syncFetcher.state !== "idle") return;
+    if (syncFetcher.data === prevSyncData.current) return;
+    prevSyncData.current = syncFetcher.data;
+
+    syncedCountRef.current += syncFetcher.data.synced ?? 0;
+
+    if (syncFetcher.data.hasMore) {
+      syncFetcher.submit(
+        { cursor: syncFetcher.data.nextCursor },
+        { method: "post", action: "/app/sync-orders" },
+      );
+    } else {
+      revalidator.revalidate();
+      shopify.toast.show(`Synced ${syncedCountRef.current} orders from Shopify.`);
+    }
+  }, [syncFetcher.data, syncFetcher.state]);
+
+  function startSync() {
+    syncedCountRef.current = 0;
+    prevSyncData.current   = null;
+    syncFetcher.submit({}, { method: "post", action: "/app/sync-orders" });
+  }
 
   function toggleSelection(orderId) {
     setSelectedIds((prev) => {
@@ -600,6 +629,9 @@ export default function Orders() {
             </div>
             <s-button type="submit">Search</s-button>
             {query && <s-button href="/app/orders">Clear</s-button>}
+            <s-button disabled={isSyncing} loading={isSyncing} onClick={startSync}>
+              {isSyncing ? "Syncing…" : "↺ Sync"}
+            </s-button>
           </div>
         </Form>
       </s-section>
@@ -656,12 +688,29 @@ export default function Orders() {
           <div className="lb-empty">
             <span className="lb-empty-icon">🛒</span>
             <div className="lb-empty-title">
-              {query ? `No orders matching "${query}"` : "No orders found"}
+              {isSyncing
+                ? `Syncing orders… (${syncedCountRef.current} pulled so far)`
+                : query
+                  ? `No orders matching "${query}"`
+                  : "Sync your Shopify orders"}
             </div>
             <div className="lb-empty-desc">
-              {query ? "Try a different search term." : "Orders from your Shopify store will appear here."}
+              {isSyncing
+                ? "Fetching orders from Shopify and saving to database…"
+                : query
+                  ? "Try a different search term."
+                  : "Pull your store's orders into the app to start booking with Leopards Courier."}
             </div>
-            {query && (
+            {!isSyncing && !query && (
+              <button
+                onClick={startSync}
+                className="lb-btn lb-btn-primary"
+                style={{ display: "inline-flex", marginTop: 20 }}
+              >
+                Sync Shopify Orders
+              </button>
+            )}
+            {!isSyncing && query && (
               <a href="/app/orders" className="lb-btn lb-btn-primary" style={{ display: "inline-flex", marginTop: 16 }}>
                 Clear search
               </a>
