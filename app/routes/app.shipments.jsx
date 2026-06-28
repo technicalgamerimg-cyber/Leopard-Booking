@@ -6,31 +6,11 @@ import { useAppBridge } from "@shopify/app-bridge-react";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
 import { ensureStore } from "../services/store.server";
-import {
-  cancelShipments, listShipments,
-  refreshShipmentStatuses, refreshShipmentStatusesByDateRange,
-} from "../services/shipment.server";
+import { listShipments, cancelShipments } from "../services/shipment.server";
+import { getSettings } from "../services/settings.server";
+import { LeopardApiClient } from "../integrations/leopards/client.server";
 import { batchResolveCityNames } from "../services/city.server";
 import db from "../db.server";
-
-const ALL_STATUSES = ["BOOKED", "IN_TRANSIT", "DELIVERED", "RETURNED"];
-
-const STATUS_STYLES = {
-  PENDING:    { dot: "#e8912d", bg: "#fff5ea", text: "#8a4b00",  label: "Not booked" },
-  FAILED:     { dot: "#d72c0d", bg: "#fce8e7", text: "#7f0007",  label: "Booking failed" },
-  BOOKED:     { dot: "#2c6ecb", bg: "#eaf4fb", text: "#0d3880",  label: "Booked" },
-  IN_TRANSIT: { dot: "#5c6ac4", bg: "#f0f0ff", text: "#3d3d8f",  label: "In transit" },
-  DELIVERED:  { dot: "#3d8b40", bg: "#e3f1df", text: "#1e542a",  label: "Delivered" },
-  RETURNED:   { dot: "#e8912d", bg: "#fff5ea", text: "#8a4b00",  label: "Returned" },
-  CANCELLED:  { dot: "#8c9196", bg: "#f6f6f7", text: "#444750",  label: "Cancelled" },
-  EXCEPTION:  { dot: "#d72c0d", bg: "#fce8e7", text: "#7f0007",  label: "Exception" },
-};
-
-const TERMINAL_STATUSES = ["DELIVERED", "CANCELLED", "RETURNED"];
-
-function daysAgoYMD(days) {
-  return new Date(Date.now() - days * 86_400_000).toISOString().slice(0, 10);
-}
 
 // ── Loader / Action ───────────────────────────────────────────────────────────
 
@@ -38,22 +18,20 @@ export const loader = async ({ request }) => {
   const { session } = await authenticate.admin(request);
   const store = await ensureStore(session);
   const url   = new URL(request.url);
-  const status  = url.searchParams.get("status") ?? "";
-  const query   = url.searchParams.get("query") ?? "";
-  const page    = Number(url.searchParams.get("page") ?? "1");
-  const limit   = 50;
+  const query  = url.searchParams.get("query") ?? "";
+  const page   = Number(url.searchParams.get("page") ?? "1");
+  const limit  = 50;
 
-  const [{ shipments, total, pageCount }, statusCountRows] = await Promise.all([
-    listShipments(store.id, status, query, page, limit),
-    db.shipment.groupBy({ by: ["status"], where: { storeId: store.id }, _count: { _all: true } }),
+  const cutoff24h = new Date(Date.now() - 24 * 60 * 60 * 1000);
+
+  const [{ shipments, total, pageCount }, recentLoadsheets] = await Promise.all([
+    listShipments(store.id, "BOOKED", query, page, limit),
+    db.loadsheet.findMany({
+      where: { storeId: store.id, createdAt: { gte: cutoff24h } },
+      orderBy: { createdAt: "desc" },
+      take: 50,
+    }),
   ]);
-
-  const VISIBLE = new Set(["BOOKED", "IN_TRANSIT", "DELIVERED", "RETURNED"]);
-  const statusCounts = { ALL: 0 };
-  for (const row of statusCountRows) {
-    statusCounts[row.status] = row._count._all;
-    if (VISIBLE.has(row.status)) statusCounts.ALL += row._count._all;
-  }
 
   const cityIdList = [];
   for (const s of shipments) {
@@ -64,15 +42,19 @@ export const loader = async ({ request }) => {
   const cityNames   = Object.fromEntries([...cityNameMap.entries()].map(([id, name]) => [id, name ?? String(id)]));
 
   return {
-    status, query, page, pageCount, total, perPage: limit,
-    cityNames, statusCounts,
-    defaultFromDate: daysAgoYMD(7),
-    defaultToDate:   daysAgoYMD(0),
+    query, page, pageCount, total, perPage: limit, cityNames,
+    recentLoadsheets: recentLoadsheets.map((ls) => ({
+      id:          ls.id,
+      loadSheetId: ls.loadSheetId,
+      cnCount:     ls.cnCount,
+      status:      ls.status,
+      createdAt:   ls.createdAt.toISOString(),
+    })),
     shipments: shipments.map((s) => ({
       ...s,
       createdAt:   s.createdAt.toISOString(),
       updatedAt:   s.updatedAt.toISOString(),
-      bookedAt:    s.bookedAt?.toISOString() ?? null,
+      bookedAt:    s.bookedAt?.toISOString()    ?? null,
       deliveredAt: s.deliveredAt?.toISOString() ?? null,
       cancelledAt: s.cancelledAt?.toISOString() ?? null,
     })),
@@ -85,47 +67,90 @@ export const action = async ({ request }) => {
   const formData = await request.formData();
   const intent   = formData.get("intent");
 
-  const cnNumbers = String(formData.get("cnNumbers") ?? "")
-    .split(",").map((v) => v.trim()).filter(Boolean);
+  if (intent === "generateLoadsheet") {
+    const cnNumbers = String(formData.get("cnNumbers") ?? "")
+      .split(",").map((v) => v.trim()).filter(Boolean);
 
-  if (intent === "refresh")    return { ...await refreshShipmentStatuses(store.id, cnNumbers), intent };
-  if (intent === "refreshAll") return { ...await refreshShipmentStatuses(store.id, []), intent };
-  if (intent === "refreshByDate") {
-    const fromDate = String(formData.get("fromDate") ?? "").trim();
-    const toDate   = String(formData.get("toDate")   ?? "").trim();
-    if (!fromDate || !toDate) return { ok: false, message: "Both dates are required.", intent };
-    return { ...await refreshShipmentStatusesByDateRange(store.id, fromDate, toDate), intent };
+    if (!cnNumbers.length) {
+      return { ok: false, message: "No shipments selected.", intent };
+    }
+
+    const settings = await getSettings(store.id, { decrypt: true });
+    const client   = new LeopardApiClient({ storeId: store.id, settings });
+    const result   = await client.generateLoadSheet(cnNumbers);
+
+    if (!result.ok) {
+      return { ok: false, message: result.message ?? "Failed to generate load sheet.", intent };
+    }
+
+    const loadSheetId = result.raw?.load_sheet_id ?? result.data?.load_sheet_id;
+    if (!loadSheetId) {
+      return { ok: false, message: "Leopards did not return a load sheet ID.", intent };
+    }
+
+    const matched = await db.shipment.findMany({
+      where: { storeId: store.id, cnNumber: { in: cnNumbers } },
+      select: { id: true },
+    });
+
+    await db.loadsheet.create({
+      data: {
+        storeId:     store.id,
+        loadSheetId: String(loadSheetId),
+        cnCount:     cnNumbers.length,
+        status:      "generated",
+        shipments: {
+          create: matched.map((s) => ({ shipmentId: s.id })),
+        },
+      },
+    });
+
+    return { ok: true, message: `Load sheet generated (ID: ${loadSheetId}).`, intent };
   }
+
+  if (intent === "downloadLoadsheet") {
+    const loadsheetDbId = String(formData.get("loadsheetDbId") ?? "");
+    if (!loadsheetDbId) {
+      return { ok: false, message: "Missing load sheet ID.", intent };
+    }
+
+    const loadsheet = await db.loadsheet.findFirst({
+      where: { id: loadsheetDbId, storeId: store.id },
+    });
+
+    if (!loadsheet) {
+      return { ok: false, message: "Load sheet not found.", intent };
+    }
+
+    const settings = await getSettings(store.id, { decrypt: true });
+    const client   = new LeopardApiClient({ storeId: store.id, settings });
+    const result   = await client.downloadLoadSheet(loadsheet.loadSheetId);
+
+    if (!result.ok) {
+      return { ok: false, message: result.message ?? "Failed to download load sheet.", intent };
+    }
+
+    await db.loadsheet.update({
+      where: { id: loadsheetDbId },
+      data:  { status: "downloaded" },
+    }).catch(() => {});
+
+    return {
+      ok:        true,
+      pdfBase64: result.data.toString("base64"),
+      filename:  `loadsheet-${loadsheet.loadSheetId}.pdf`,
+      intent,
+    };
+  }
+
   if (intent === "cancel" || intent === "cancelBatch") {
+    const cnNumbers = String(formData.get("cnNumbers") ?? "")
+      .split(",").map((v) => v.trim()).filter(Boolean);
     return { ...await cancelShipments(store.id, cnNumbers, admin), intent };
   }
+
   return { ok: false, message: "Unknown action.", intent };
 };
-
-// ── Helper components ─────────────────────────────────────────────────────────
-
-function StatusPill({ status, hasError }) {
-  const key = hasError && status === "PENDING" ? "FAILED" : status;
-  const s   = STATUS_STYLES[key] ?? { dot: "#8c9196", bg: "#f6f6f7", text: "#444750", label: key };
-  return (
-    <span className="lb-pill" style={{
-      background: s.bg,
-      color: s.text,
-      borderColor: key === "FAILED" ? s.dot : "transparent",
-    }}>
-      <span className="lb-pill-dot" style={{ background: s.dot }} />
-      {s.label}
-    </span>
-  );
-}
-
-function buildPageQuery({ status, query, page }) {
-  const p = new URLSearchParams();
-  if (status) p.set("status", status);
-  if (query)  p.set("query",  query);
-  if (page > 1) p.set("page", String(page));
-  return p.toString();
-}
 
 // ── Cancel Confirmation Modal ─────────────────────────────────────────────────
 
@@ -168,12 +193,21 @@ function CancelModal({ title, message, onConfirm, onClose, loading }) {
   );
 }
 
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+function buildPageQuery({ query, page }) {
+  const p = new URLSearchParams();
+  if (query)    p.set("query", query);
+  if (page > 1) p.set("page", String(page));
+  return p.toString();
+}
+
 // ── Page ──────────────────────────────────────────────────────────────────────
 
 export default function Shipments() {
   const {
-    shipments, status, query, page, pageCount, total, perPage,
-    cityNames, statusCounts, defaultFromDate, defaultToDate,
+    shipments, query, page, pageCount, total, perPage,
+    cityNames, recentLoadsheets,
   } = useLoaderData();
 
   const fetcher    = useFetcher();
@@ -181,41 +215,79 @@ export default function Shipments() {
   const revalidator = useRevalidator();
   const shopify    = useAppBridge();
 
-  const [cancelTarget,       setCancelTarget]       = useState(null);  // single CN
   const [selectedCns,        setSelectedCns]        = useState(() => new Set());
+  const [cancelTarget,       setCancelTarget]        = useState(null);
   const [batchCancelConfirm, setBatchCancelConfirm] = useState(false);
-  const [fromDate,           setFromDate]           = useState(defaultFromDate);
-  const [toDate,             setToDate]             = useState(defaultToDate);
   const prevFetcherData = useRef(null);
 
-  const loading         = navigation.state === "loading";
-  const submittingCn    = fetcher.state !== "idle" ? fetcher.formData?.get("cnNumbers") : null;
-  const isRefreshAll    = fetcher.state !== "idle" && fetcher.formData?.get("intent") === "refreshAll";
-  const isRefreshByDate = fetcher.state !== "idle" && fetcher.formData?.get("intent") === "refreshByDate";
-  const isBatchCancel   = fetcher.state !== "idle" && fetcher.formData?.get("intent") === "cancelBatch";
-  const isSingleCancel  = fetcher.state !== "idle" && fetcher.formData?.get("intent") === "cancel";
+  const loading          = navigation.state === "loading";
+  const isGenerating     = fetcher.state !== "idle" && fetcher.formData?.get("intent") === "generateLoadsheet";
+  const isDownloading    = fetcher.state !== "idle" && fetcher.formData?.get("intent") === "downloadLoadsheet";
+  const isSingleCancel   = fetcher.state !== "idle" && fetcher.formData?.get("intent") === "cancel";
+  const isBatchCancel    = fetcher.state !== "idle" && fetcher.formData?.get("intent") === "cancelBatch";
+  const downloadingId    = isDownloading ? String(fetcher.formData?.get("loadsheetDbId") ?? "") : null;
+  const submittingCn     = (isSingleCancel || isBatchCancel) ? fetcher.formData?.get("cnNumbers") : null;
 
   useEffect(() => {
     if (!fetcher.data || fetcher.data === prevFetcherData.current) return;
     prevFetcherData.current = fetcher.data;
 
-    if (fetcher.data.message) {
-      shopify.toast.show(fetcher.data.message, { isError: !fetcher.data.ok });
+    if (fetcher.data.intent === "generateLoadsheet") {
+      if (fetcher.data.message) {
+        shopify.toast.show(fetcher.data.message, { isError: !fetcher.data.ok });
+      }
+      if (fetcher.data.ok) {
+        setSelectedCns(new Set());
+        revalidator.revalidate();
+      }
     }
-    if (fetcher.data.ok) {
-      const intent = fetcher.data.intent;
-      revalidator.revalidate();
-      if (intent === "cancelBatch") { setSelectedCns(new Set()); setBatchCancelConfirm(false); }
-      if (intent === "cancel")      setCancelTarget(null);
+
+    if (fetcher.data.intent === "downloadLoadsheet") {
+      if (fetcher.data.ok && fetcher.data.pdfBase64) {
+        try {
+          const binary = atob(fetcher.data.pdfBase64);
+          const bytes  = new Uint8Array(binary.length);
+          for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+          const blob = new Blob([bytes], { type: "application/pdf" });
+          const url  = URL.createObjectURL(blob);
+          const a    = document.createElement("a");
+          a.href     = url;
+          a.download = fetcher.data.filename ?? "loadsheet.pdf";
+          document.body.appendChild(a);
+          a.click();
+          a.remove();
+          setTimeout(() => URL.revokeObjectURL(url), 10_000);
+          revalidator.revalidate();
+        } catch {
+          shopify.toast.show("Failed to open PDF. Please try again.", { isError: true });
+        }
+      } else if (fetcher.data.message) {
+        shopify.toast.show(fetcher.data.message, { isError: true });
+      }
+    }
+
+    if (fetcher.data.intent === "cancel" || fetcher.data.intent === "cancelBatch") {
+      if (fetcher.data.message) {
+        shopify.toast.show(fetcher.data.message, { isError: !fetcher.data.ok });
+      }
+      if (fetcher.data.ok) {
+        revalidator.revalidate();
+        if (fetcher.data.intent === "cancelBatch") { setSelectedCns(new Set()); setBatchCancelConfirm(false); }
+        if (fetcher.data.intent === "cancel")      setCancelTarget(null);
+      }
     }
   }, [fetcher.data, shopify]); // eslint-disable-line react-hooks/exhaustive-deps
 
   function toggleCn(cn) {
-    setSelectedCns((prev) => { const n = new Set(prev); n.has(cn) ? n.delete(cn) : n.add(cn); return n; });
+    setSelectedCns((prev) => {
+      const n = new Set(prev);
+      n.has(cn) ? n.delete(cn) : n.add(cn);
+      return n;
+    });
   }
 
-  const selectableShipments   = shipments.filter((s) => s.cnNumber && !TERMINAL_STATUSES.includes(s.status));
-  const allSelectableSelected = selectableShipments.length > 0 && selectableShipments.every((s) => selectedCns.has(s.cnNumber));
+  const bookableShipments = shipments.filter((s) => s.cnNumber);
+  const allSelected       = bookableShipments.length > 0 && bookableShipments.every((s) => selectedCns.has(s.cnNumber));
 
   const startCount = total === 0 ? 0 : (page - 1) * perPage + 1;
   const endCount   = Math.min(page * perPage, total);
@@ -223,7 +295,7 @@ export default function Shipments() {
   return (
     <s-page heading="Shipments">
 
-      {/* ── Cancel Modals (centered overlays, not inline sections) ── */}
+      {/* ── Cancel Modals ── */}
       {cancelTarget && (
         <CancelModal
           title={`Cancel shipment ${cancelTarget}?`}
@@ -255,144 +327,126 @@ export default function Shipments() {
         />
       )}
 
-      {/* ── Status tabs ── */}
-      <s-section>
-        <div style={{ display: "flex", gap: 4, flexWrap: "wrap", marginBottom: 14 }}>
-          {[
-            { key: "", label: "All", count: statusCounts.ALL },
-            ...ALL_STATUSES.map((s) => ({ key: s, label: STATUS_STYLES[s]?.label ?? s, count: statusCounts[s] ?? 0 })),
-          ].map(({ key, label, count }) => {
-            const isActive = status === key;
-            const style    = STATUS_STYLES[key];
-            return (
-              <Link
-                key={key}
-                to={`/app/shipments?${buildPageQuery({ status: key, query, page: 1 })}`}
-                className={`lb-tab${isActive ? " lb-tab-active" : ""}`}
-                style={{
-                  background:  isActive ? (style?.bg ?? "#f0f0ff") : "#f6f6f7",
-                  color:       isActive ? (style?.text ?? "#3d3d8f") : "#444750",
-                  borderColor: isActive ? (style?.dot ?? "#5c6ac4") : "transparent",
-                }}
-              >
-                {key && style && <span className="lb-pill-dot" style={{ background: style.dot }} />}
-                {label}
-                {count > 0 && (
-                  <span
-                    className="lb-tab-count"
-                    style={{
-                      background: isActive ? (style?.dot ?? "#5c6ac4") : "#e1e3e5",
-                      color:      isActive ? "#fff" : "#444750",
-                    }}
-                  >
-                    {count}
-                  </span>
-                )}
-              </Link>
-            );
-          })}
-        </div>
-
-        {/* Search row */}
-        <Form method="get" style={{ display: "contents" }}>
-          <input type="hidden" name="status" value={status} />
-          <div style={{ display: "flex", gap: 10, alignItems: "flex-end", flexWrap: "wrap" }}>
-            <div style={{ flex: "1 1 260px" }}>
-              <s-text-field label="Search" name="query" defaultValue={query} placeholder="CN number, order name, consignee…" />
+      {/* ── Load Sheet History (last 24 h) ── */}
+      {recentLoadsheets.length > 0 && (
+        <s-section>
+          <div className="lb-card">
+            <div className="lb-card-header">
+              <span className="lb-section-label">Load Sheet History (last 24 hours)</span>
             </div>
-            <s-button type="submit">Search</s-button>
-            {(status || query) && <s-button href="/app/shipments">Clear</s-button>}
-          </div>
-        </Form>
-      </s-section>
-
-      {/* ── Sync tools ── */}
-      <s-section>
-        <div className="lb-card">
-          <div className="lb-card-header">
-            <span className="lb-section-label">Status synchronisation</span>
-          </div>
-          <div className="lb-card-body">
-            <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "flex-end" }}>
-              {/* Sync all active */}
-              <div>
-                <div style={{ fontSize: 12, color: "#6d7175", marginBottom: 6 }}>Sync all active shipments</div>
-                <s-button
-                  variant="primary"
-                  disabled={isRefreshAll}
-                  loading={isRefreshAll}
-                  onClick={() => fetcher.submit({ intent: "refreshAll" }, { method: "post", action: "/app/shipments" })}
-                >
-                  Sync all statuses
-                </s-button>
-              </div>
-
-              <div style={{ width: 1, background: "#e1e3e5", alignSelf: "stretch", margin: "0 4px" }} />
-
-              {/* Sync by date range */}
-              <div>
-                <div style={{ fontSize: 12, color: "#6d7175", marginBottom: 6 }}>Sync by booking date range</div>
-                <div style={{ display: "flex", gap: 8, alignItems: "flex-end", flexWrap: "wrap" }}>
-                  <div style={{ minWidth: 140 }}>
-                    <s-text-field
-                      label="From"
-                      type="date"
-                      value={fromDate}
-                      onChange={(e) => setFromDate(e.target?.value ?? e.currentTarget?.value ?? fromDate)}
-                    />
-                  </div>
-                  <div style={{ minWidth: 140 }}>
-                    <s-text-field
-                      label="To"
-                      type="date"
-                      value={toDate}
-                      onChange={(e) => setToDate(e.target?.value ?? e.currentTarget?.value ?? toDate)}
-                    />
-                  </div>
-                  <s-button
-                    disabled={isRefreshByDate}
-                    loading={isRefreshByDate}
-                    onClick={() => fetcher.submit({ intent: "refreshByDate", fromDate, toDate }, { method: "post", action: "/app/shipments" })}
-                  >
-                    Sync range
-                  </s-button>
-                </div>
-              </div>
+            <div className="lb-card-body">
+              <s-table>
+                <s-table-header-row>
+                  <s-table-header>Load Sheet ID</s-table-header>
+                  <s-table-header>Shipments</s-table-header>
+                  <s-table-header>Generated At</s-table-header>
+                  <s-table-header>Status</s-table-header>
+                  <s-table-header>Download</s-table-header>
+                </s-table-header-row>
+                <s-table-body>
+                  {recentLoadsheets.map((ls) => {
+                    const isThisDownloading = downloadingId === ls.id;
+                    return (
+                      <s-table-row key={ls.id}>
+                        <s-table-cell>
+                          <span className="lb-mono" style={{ fontSize: 13 }}>{ls.loadSheetId}</span>
+                        </s-table-cell>
+                        <s-table-cell>
+                          <span style={{ fontSize: 13 }}>{ls.cnCount} CN{ls.cnCount !== 1 ? "s" : ""}</span>
+                        </s-table-cell>
+                        <s-table-cell>
+                          <span style={{ fontSize: 13 }}>{new Date(ls.createdAt).toLocaleString()}</span>
+                        </s-table-cell>
+                        <s-table-cell>
+                          <span style={{
+                            fontSize:   12,
+                            fontWeight: 600,
+                            color:      ls.status === "downloaded" ? "#3d8b40" : "#2c6ecb",
+                          }}>
+                            {ls.status === "downloaded" ? "Downloaded" : "Generated"}
+                          </span>
+                        </s-table-cell>
+                        <s-table-cell>
+                          <s-button
+                            disabled={isThisDownloading || (isDownloading && !isThisDownloading)}
+                            loading={isThisDownloading}
+                            onClick={() => fetcher.submit(
+                              { intent: "downloadLoadsheet", loadsheetDbId: ls.id },
+                              { method: "post", action: "/app/shipments" },
+                            )}
+                          >
+                            Download PDF
+                          </s-button>
+                        </s-table-cell>
+                      </s-table-row>
+                    );
+                  })}
+                </s-table-body>
+              </s-table>
             </div>
           </div>
-        </div>
-      </s-section>
+        </s-section>
+      )}
 
       {/* ── Batch action bar ── */}
       {selectedCns.size > 0 && (
         <s-section>
           <div style={{
-            background: "#fff5f5",
-            border: "1px solid #fca5a5",
+            background:   "#eaf4fb",
+            border:       "1px solid #90c5f0",
             borderRadius: 8,
-            padding: "12px 16px",
-            display: "flex",
-            alignItems: "center",
-            gap: 12,
-            flexWrap: "wrap",
+            padding:      "12px 16px",
+            display:      "flex",
+            alignItems:   "center",
+            gap:          12,
+            flexWrap:     "wrap",
           }}>
-            <div style={{ fontWeight: 600, fontSize: 14, color: "#7f0007", flex: 1 }}>
+            <div style={{ fontWeight: 600, fontSize: 14, color: "#0d3880", flex: 1 }}>
               {selectedCns.size} shipment{selectedCns.size !== 1 ? "s" : ""} selected
             </div>
             <s-button
+              variant="primary"
+              disabled={isGenerating || isBatchCancel}
+              loading={isGenerating}
+              onClick={() => fetcher.submit(
+                { intent: "generateLoadsheet", cnNumbers: Array.from(selectedCns).join(",") },
+                { method: "post", action: "/app/shipments" },
+              )}
+            >
+              Generate Load Sheet
+            </s-button>
+            <s-button
               tone="critical"
-              disabled={isBatchCancel}
+              disabled={isBatchCancel || isGenerating}
               loading={isBatchCancel}
               onClick={() => setBatchCancelConfirm(true)}
             >
               Cancel {selectedCns.size} shipment{selectedCns.size !== 1 ? "s" : ""}
             </s-button>
-            <s-button onClick={() => setSelectedCns(new Set())} disabled={isBatchCancel}>
+            <s-button onClick={() => setSelectedCns(new Set())} disabled={isGenerating || isBatchCancel}>
               Clear selection
             </s-button>
           </div>
         </s-section>
       )}
+
+      {/* ── Search ── */}
+      <s-section>
+        <Form method="get" style={{ display: "contents" }}>
+          <div style={{ display: "flex", gap: 10, alignItems: "flex-end", flexWrap: "wrap" }}>
+            <div style={{ flex: "1 1 260px" }}>
+              <s-text-field
+                label="Search"
+                name="query"
+                defaultValue={query}
+                placeholder="CN number, order name, consignee…"
+              />
+            </div>
+            <s-button type="submit">Search</s-button>
+            {query && <s-button href="/app/shipments">Clear</s-button>}
+          </div>
+        </Form>
+      </s-section>
 
       {/* ── Table ── */}
       <s-section>
@@ -404,158 +458,126 @@ export default function Shipments() {
           <div className="lb-empty">
             <span className="lb-empty-icon">📭</span>
             <div className="lb-empty-title">
-              {status || query ? "No shipments match this filter" : "No shipments yet"}
+              {query ? "No booked shipments match this search" : "No booked shipments yet"}
             </div>
             <div className="lb-empty-desc">
-              {status && `Filtered by: ${STATUS_STYLES[status]?.label ?? status}.`}
-              {query && ` Searching: "${query}".`}
-              {!status && !query && "Booked orders will appear here."}
+              {query ? `Searching: "${query}".` : "Booked orders will appear here."}
             </div>
-            {(status || query) && (
+            {query && (
               <Link to="/app/shipments" className="lb-btn lb-btn-primary" style={{ display: "inline-flex", marginTop: 16 }}>
-                Clear filters
+                Clear search
               </Link>
             )}
           </div>
         ) : (
           <>
-            {/* Record count row */}
             <div style={{ fontSize: 12, color: "#8c9196", marginBottom: 8, paddingLeft: 2 }}>
-              Showing {startCount}–{endCount} of {total} shipment{total !== 1 ? "s" : ""}
+              Showing {startCount}–{endCount} of {total} booked shipment{total !== 1 ? "s" : ""}
             </div>
             <s-table>
               <s-table-header-row>
                 <s-table-header>
                   <s-checkbox
-                    checked={allSelectableSelected}
-                    onChange={() => allSelectableSelected
+                    checked={allSelected}
+                    onChange={() => allSelected
                       ? setSelectedCns(new Set())
-                      : setSelectedCns(new Set(selectableShipments.map((s) => s.cnNumber)))
+                      : setSelectedCns(new Set(bookableShipments.map((s) => s.cnNumber)))
                     }
-                    disabled={selectableShipments.length === 0}
+                    disabled={bookableShipments.length === 0}
                   />
                 </s-table-header>
                 <s-table-header>Order</s-table-header>
                 <s-table-header>CN Number</s-table-header>
-                <s-table-header>Status</s-table-header>
                 <s-table-header>Consignee</s-table-header>
                 <s-table-header>Destination</s-table-header>
                 <s-table-header>COD</s-table-header>
-                <s-table-header>Date</s-table-header>
+                <s-table-header>Booked At</s-table-header>
                 <s-table-header>Actions</s-table-header>
               </s-table-header-row>
               <s-table-body>
-                {shipments.map((shipment) => {
-                  const isThisRowBusy = submittingCn === shipment.cnNumber;
-                  const isTerminal    = TERMINAL_STATUSES.includes(shipment.status);
-                  const isSelectable  = shipment.cnNumber && !isTerminal;
-                  const hasFailed     = Boolean(shipment.lastError) && shipment.status === "PENDING";
-                  const relevantDate  = shipment.deliveredAt ?? shipment.cancelledAt ?? shipment.bookedAt;
+                {shipments.map((shipment) => (
+                  <s-table-row key={shipment.id}>
+                    <s-table-cell>
+                      <s-checkbox
+                        checked={selectedCns.has(shipment.cnNumber)}
+                        disabled={!shipment.cnNumber}
+                        onChange={() => toggleCn(shipment.cnNumber)}
+                      />
+                    </s-table-cell>
 
-                  return (
-                    <s-table-row key={shipment.id}>
-                      <s-table-cell>
-                        <s-checkbox
-                          checked={selectedCns.has(shipment.cnNumber)}
-                          disabled={!isSelectable}
-                          onChange={() => toggleCn(shipment.cnNumber)}
-                        />
-                      </s-table-cell>
+                    <s-table-cell>
+                      <s-link href={`/app/shipments/${shipment.id}`}>
+                        <span style={{ fontWeight: 600 }}>{shipment.shopifyOrderName}</span>
+                      </s-link>
+                    </s-table-cell>
 
-                      <s-table-cell>
-                        <s-link href={`/app/shipments/${shipment.id}`}>
-                          <span style={{ fontWeight: 600 }}>{shipment.shopifyOrderName}</span>
-                        </s-link>
-                      </s-table-cell>
+                    <s-table-cell>
+                      <span
+                        className="lb-mono"
+                        style={{ fontSize: 13, color: shipment.cnNumber ? "#202223" : "#8c9196" }}
+                      >
+                        {shipment.cnNumber || "—"}
+                      </span>
+                    </s-table-cell>
 
-                      <s-table-cell>
-                        {shipment.slipLink ? (
-                          <s-link href={shipment.slipLink} target="_blank">
-                            <span className="lb-mono" style={{ fontSize: 13 }}>{shipment.cnNumber}</span>
-                          </s-link>
-                        ) : (
-                          <span className="lb-mono" style={{ fontSize: 13, color: shipment.cnNumber ? "#202223" : "#8c9196" }}>
-                            {shipment.cnNumber || "—"}
-                          </span>
-                        )}
-                      </s-table-cell>
+                    <s-table-cell>
+                      <div style={{ fontSize: 13, color: "#202223" }}>{shipment.consigneeName}</div>
+                      {shipment.consigneePhone && (
+                        <div style={{ fontSize: 11, color: "#8c9196", marginTop: 1 }}>{shipment.consigneePhone}</div>
+                      )}
+                    </s-table-cell>
 
-                      <s-table-cell>
-                        <div>
-                          <StatusPill status={shipment.status} hasError={hasFailed} />
-                          {shipment.leopardStatusRaw && !hasFailed && (
-                            <div style={{ fontSize: 11, color: "#8c9196", marginTop: 2 }}>{shipment.leopardStatusRaw}</div>
-                          )}
-                          {hasFailed && (
-                            <div
-                              style={{ fontSize: 11, color: "#d72c0d", marginTop: 3, maxWidth: 180, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
-                              title={shipment.lastError}
-                            >
-                              {shipment.lastError}
-                            </div>
-                          )}
-                          {shipment.writebackFailed && shipment.status === "BOOKED" && (
-                            <div style={{ fontSize: 11, color: "#b7831a", marginTop: 3, fontWeight: 600 }}>⚠ Shopify sync failed</div>
-                          )}
-                        </div>
-                      </s-table-cell>
+                    <s-table-cell>
+                      <span style={{ fontSize: 13, color: "#444750" }}>
+                        {shipment.destinationCityId
+                          ? cityNames[shipment.destinationCityId] ?? shipment.destinationCityId
+                          : "—"}
+                      </span>
+                    </s-table-cell>
 
-                      <s-table-cell>
-                        <div style={{ fontSize: 13, color: "#202223" }}>{shipment.consigneeName}</div>
-                        {shipment.consigneePhone && (
-                          <div style={{ fontSize: 11, color: "#8c9196", marginTop: 1 }}>{shipment.consigneePhone}</div>
-                        )}
-                      </s-table-cell>
-
-                      <s-table-cell>
-                        <span style={{ fontSize: 13, color: "#444750" }}>
-                          {shipment.destinationCityId
-                            ? cityNames[shipment.destinationCityId] ?? shipment.destinationCityId
-                            : "—"}
+                    <s-table-cell>
+                      {shipment.codAmount > 0 ? (
+                        <span style={{ fontSize: 13, fontWeight: 700, color: "#202223" }}>
+                          {shipment.codAmount.toLocaleString()}
                         </span>
-                      </s-table-cell>
+                      ) : (
+                        <span style={{ fontSize: 12, color: "#8c9196", fontStyle: "italic" }}>—</span>
+                      )}
+                    </s-table-cell>
 
-                      <s-table-cell>
-                        {shipment.codAmount > 0 ? (
-                          <span style={{ fontSize: 13, fontWeight: 700, color: "#202223" }}>
-                            {shipment.codAmount.toLocaleString()}
-                          </span>
-                        ) : (
-                          <span style={{ fontSize: 12, color: "#8c9196", fontStyle: "italic" }}>—</span>
-                        )}
-                      </s-table-cell>
-
-                      <s-table-cell>
-                        {relevantDate ? (
-                          <div>
-                            <div style={{ fontSize: 13, color: "#202223" }}>
-                              {new Date(relevantDate).toLocaleDateString()}
-                            </div>
-                            <div style={{ fontSize: 11, color: "#8c9196" }}>
-                              {shipment.deliveredAt ? "delivered" : shipment.cancelledAt ? "cancelled" : "booked"}
-                            </div>
+                    <s-table-cell>
+                      {shipment.bookedAt ? (
+                        <div>
+                          <div style={{ fontSize: 13, color: "#202223" }}>
+                            {new Date(shipment.bookedAt).toLocaleDateString()}
                           </div>
-                        ) : "—"}
-                      </s-table-cell>
-
-                      <s-table-cell>
-                        <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
-                          <s-button href={`/app/shipments/${shipment.id}`}>View</s-button>
-                          {!isTerminal && shipment.cnNumber && (
-                            <s-button
-                              tone="critical"
-                              disabled={isThisRowBusy}
-                              loading={isThisRowBusy}
-                              onClick={() => setCancelTarget(shipment.cnNumber)}
-                            >
-                              Cancel
-                            </s-button>
-                          )}
+                          <div style={{ fontSize: 11, color: "#8c9196" }}>
+                            {new Date(shipment.bookedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+                          </div>
                         </div>
-                      </s-table-cell>
-                    </s-table-row>
-                  );
-                })}
+                      ) : "—"}
+                    </s-table-cell>
+
+                    <s-table-cell>
+                      <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                        <s-button href={`/app/shipments/${shipment.id}`}>View</s-button>
+                        {shipment.slipLink && (
+                          <s-button href={shipment.slipLink} target="_blank">Label</s-button>
+                        )}
+                        {shipment.cnNumber && (
+                          <s-button
+                            tone="critical"
+                            disabled={submittingCn === shipment.cnNumber}
+                            loading={submittingCn === shipment.cnNumber}
+                            onClick={() => setCancelTarget(shipment.cnNumber)}
+                          >
+                            Cancel
+                          </s-button>
+                        )}
+                      </div>
+                    </s-table-cell>
+                  </s-table-row>
+                ))}
               </s-table-body>
             </s-table>
           </>
@@ -567,14 +589,14 @@ export default function Shipments() {
         <s-section>
           <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
             <s-button
-              href={page > 1 ? `/app/shipments?${buildPageQuery({ status, query, page: page - 1 })}` : undefined}
+              href={page > 1 ? `/app/shipments?${buildPageQuery({ query, page: page - 1 })}` : undefined}
               disabled={page <= 1}
             >
               ← Previous
             </s-button>
             <span style={{ fontSize: 13, color: "#6d7175" }}>{startCount}–{endCount} of {total}</span>
             <s-button
-              href={page < pageCount ? `/app/shipments?${buildPageQuery({ status, query, page: page + 1 })}` : undefined}
+              href={page < pageCount ? `/app/shipments?${buildPageQuery({ query, page: page + 1 })}` : undefined}
               disabled={page >= pageCount}
             >
               Next →
