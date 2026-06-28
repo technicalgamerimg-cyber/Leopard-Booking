@@ -76,15 +76,19 @@ function encodeJsonBody(payload) {
   return JSON.stringify(payload);
 }
 
-function safeParseJson(text, httpStatus, contentType = "", endpoint = "") {
+function safeParseJson(text, httpStatus, contentType = "", endpoint = "", requestId = null) {
   if (!text) return { json: {}, parseError: null };
 
   const isJson = contentType.toLowerCase().includes("application/json");
 
   if (!isJson) {
-    console.warn(
-      `[leopards] ${endpoint} non-JSON response | HTTP ${httpStatus} | content-type: ${contentType} | preview: ${text.slice(0, 500)}`
-    );
+    console.warn("[leopards] non-JSON response", {
+      endpoint,
+      status:      httpStatus,
+      contentType,
+      requestId,
+      preview:     text.slice(0, 500),
+    });
     return {
       json: null,
       parseError: {
@@ -102,9 +106,11 @@ function safeParseJson(text, httpStatus, contentType = "", endpoint = "") {
   try {
     return { json: JSON.parse(text), parseError: null };
   } catch {
-    console.warn(
-      `[leopards] ${endpoint} JSON parse failed | HTTP ${httpStatus} | preview: ${text.slice(0, 500)}`
-    );
+    console.warn("[leopards] JSON parse failed", {
+      endpoint,
+      status:  httpStatus,
+      preview: text.slice(0, 500),
+    });
     return {
       json: null,
       parseError: {
@@ -151,8 +157,13 @@ export class LeopardApiClient {
           continue;
         }
         const contentType = response.headers.get("content-type") ?? "";
+        const requestId   =
+          response.headers.get("x-request-id") ??
+          response.headers.get("cf-ray") ??
+          response.headers.get("x-trace-id") ??
+          null;
         const text = await response.text();
-        const { json, parseError } = safeParseJson(text, httpStatus, contentType, endpoint);
+        const { json, parseError } = safeParseJson(text, httpStatus, contentType, endpoint, requestId);
         if (parseError) {
           await this.logCall(endpoint, parseError, 0, attempt);
           return parseError;
@@ -240,8 +251,13 @@ export class LeopardApiClient {
           break;
         }
 
+        const requestId =
+          response.headers.get("x-request-id") ??
+          response.headers.get("cf-ray") ??
+          response.headers.get("x-trace-id") ??
+          null;
         const text = await response.text();
-        const { json, parseError } = safeParseJson(text, httpStatus, responseContentType, endpoint);
+        const { json, parseError } = safeParseJson(text, httpStatus, responseContentType, endpoint, requestId);
         if (parseError) {
           if (httpStatus !== null && httpStatus >= 500) leopardBreaker.recordFailure();
           result = parseError;
@@ -304,14 +320,55 @@ export class LeopardApiClient {
     return this.request("bookPacket/format/json/", payload);
   }
 
-  batchBookPacket(packets) {
-    // Leopards' batch endpoint expects the packet list as JSON in the body,
-    // not URL-encoded. Send `application/json` so the array is parsed correctly.
-    return this.request(
+  async batchBookPacket(packets) {
+    const { api_key, api_password } = this.credentials();
+    const result = await this.request(
       "batchBookPacketv2/format/json/",
-      { packets },
+      // Batch endpoint requires credentials inside the JSON body (not query string only)
+      { api_key, api_password, packets },
       { json: true },
     );
+
+    if (result.ok) {
+      console.log("[leopards] batch endpoint used", { packets: packets.length });
+      return result;
+    }
+
+    if (result.httpStatus === 404 && process.env.LEOPARDS_BATCH_FALLBACK === "true") {
+      console.warn(
+        "[leopards] WARNING: batchBookPacketv2 returned 404 — LEOPARDS_BATCH_FALLBACK=true. " +
+        "Falling back to sequential bookPacket calls. Performance will be lower than native batch. " +
+        "Investigate the 404 and disable the fallback once the root cause is resolved.",
+        { endpoint: "batchBookPacketv2/format/json/", packets: packets.length },
+      );
+      return this._sequentialFallback(packets);
+    }
+
+    return result;
+  }
+
+  async _sequentialFallback(packets) {
+    const dataArr = [];
+    for (const packet of packets) {
+      const r   = await this.bookPacket(packet);
+      const raw = Array.isArray(r.data) ? r.data[0] : r.data;
+      dataArr.push({
+        booked_packet_order_id: packet.booked_packet_order_id,
+        track_number:           r.ok ? (raw?.track_number ?? null) : null,
+        slip_link:              r.ok ? (raw?.slip_link ?? null) : null,
+        error:                  r.ok ? undefined : (r.message ?? "Single booking failed"),
+      });
+    }
+    // ok: true — per-packet data exists for the service to process.
+    // Matches real batch API contract: status 1 even on partial failures.
+    // Individual failures surface via missing track_number + error field.
+    return {
+      ok:            true,
+      data:          dataArr,
+      raw:           { data: dataArr },
+      httpStatus:    200,
+      leopardStatus: 1,
+    };
   }
 
   cancelBookedPackets(cnNumbers) {
@@ -359,8 +416,13 @@ export class LeopardApiClient {
         await this.logCall(endpoint, result, 0, 0);
         return result;
       }
+      const requestId =
+        response.headers.get("x-request-id") ??
+        response.headers.get("cf-ray") ??
+        response.headers.get("x-trace-id") ??
+        null;
       const text = await response.text();
-      const { json, parseError } = safeParseJson(text, httpStatus, ct, endpoint);
+      const { json, parseError } = safeParseJson(text, httpStatus, ct, endpoint, requestId);
       if (parseError) {
         await this.logCall(endpoint, parseError, 0, 0);
         return parseError;
