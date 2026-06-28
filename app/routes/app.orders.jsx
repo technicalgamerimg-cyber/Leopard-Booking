@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Form, useFetcher, useLoaderData, useNavigation, useRouteError } from "react-router";
+import { Form, useFetcher, useLoaderData, useNavigation, useRevalidator, useRouteError } from "react-router";
 import { useAppBridge } from "@shopify/app-bridge-react";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
@@ -265,6 +265,8 @@ export const action = async ({ request }) => {
   if (intent === "bookBatch") {
     let orderIds = [];
     try { orderIds = JSON.parse(String(formData.get("orderIds") ?? "[]")); } catch { orderIds = []; }
+    if (!orderIds.length) return { ok: false, message: "No orders selected." };
+    if (orderIds.length > 1000) return { ok: false, message: "Too many orders selected (max 1000)." };
     return bookOrdersBatch({ admin, storeId: store.id, orderIds });
   }
 
@@ -306,9 +308,12 @@ export default function Orders() {
     defaultWeightGrams, defaultSpecialInstructions,
   } = useLoaderData();
 
-  const fetcher    = useFetcher();
-  const navigation = useNavigation();
-  const shopify    = useAppBridge();
+  const fetcher     = useFetcher();
+  const navigation  = useNavigation();
+  const shopify     = useAppBridge();
+  const revalidator = useRevalidator();
+
+  const SELECTION_CAP = 100;
 
   const [selectedIds,       setSelectedIds]       = useState(() => new Set());
   const [bookingModalOrder, setBookingModalOrder]  = useState(null);
@@ -337,20 +342,28 @@ export default function Orders() {
     }
     if (fetcher.data.ok) {
       setBookingModalOrder(null);
-      if (fetcher.formData?.get("intent") === "bookBatch") setSelectedIds(new Set());
+      if (fetcher.formData?.get("intent") === "bookBatch") {
+        setSelectedIds(new Set());
+        revalidator.revalidate();
+      }
     }
   }, [fetcher.data, fetcher.formData, shopify]);
 
   function toggleSelection(orderId) {
     setSelectedIds((prev) => {
       const next = new Set(prev);
-      next.has(orderId) ? next.delete(orderId) : next.add(orderId);
+      if (next.has(orderId)) {
+        next.delete(orderId);
+      } else if (next.size < SELECTION_CAP) {
+        next.add(orderId);
+      }
       return next;
     });
   }
 
   const bookableOrders     = orders.filter((o) => canBookOrder(o, hasCredentials));
-  const allVisibleSelected = bookableOrders.length > 0 && bookableOrders.every((o) => selectedIds.has(o.id));
+  const selectableOrders   = bookableOrders.slice(0, SELECTION_CAP);
+  const allVisibleSelected = selectableOrders.length > 0 && selectableOrders.every((o) => selectedIds.has(o.id));
 
   return (
     <s-page heading="Orders">
@@ -482,6 +495,12 @@ export default function Orders() {
               Clear selection
             </s-button>
           </div>
+          {selectedIds.size >= SELECTION_CAP && (
+            <div className="lb-alert lb-alert-warning" style={{ marginTop: 8 }}>
+              <span>⚠️</span>
+              <span style={{ fontSize: 13 }}>Selection limit reached ({SELECTION_CAP}). Book these before selecting more.</span>
+            </div>
+          )}
         </s-section>
       )}
 
@@ -515,9 +534,9 @@ export default function Orders() {
                   onChange={() =>
                     allVisibleSelected
                       ? setSelectedIds(new Set())
-                      : setSelectedIds(new Set(bookableOrders.map((o) => o.id)))
+                      : setSelectedIds(new Set(selectableOrders.map((o) => o.id)))
                   }
-                  disabled={bookableOrders.length === 0}
+                  disabled={selectableOrders.length === 0}
                 />
               </s-table-header>
               <s-table-header>Order</s-table-header>
@@ -540,7 +559,7 @@ export default function Orders() {
                     <s-table-cell>
                       <s-checkbox
                         checked={selectedIds.has(order.id)}
-                        disabled={!isBookable || anyBookingInFlight}
+                        disabled={!isBookable || anyBookingInFlight || (selectedIds.size >= SELECTION_CAP && !selectedIds.has(order.id))}
                         onChange={() => toggleSelection(order.id)}
                       />
                     </s-table-cell>

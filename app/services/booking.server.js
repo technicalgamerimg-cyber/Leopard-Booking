@@ -411,10 +411,6 @@ export async function bookOrdersBatch({ admin, storeId, orderIds }) {
   if (!Array.isArray(orderIds) || orderIds.length === 0) {
     return { ok: false, message: "Select at least one order to book." };
   }
-  if (orderIds.length > 100) {
-    return { ok: false, message: "Maximum 100 orders per batch. Split into smaller groups." };
-  }
-
   const settings = await getSettings(storeId, { decrypt: true });
   if (!settings.leopardApiKey || !settings.leopardApiPassword) {
     return { ok: false, message: "Save Leopards credentials before booking." };
@@ -542,113 +538,117 @@ export async function bookOrdersBatch({ admin, storeId, orderIds }) {
     return { ok: false, message: "No valid orders to book.", results };
   }
 
-  // ── 4. Call Leopards batch API ───────────────────────────────────────────────
+  // ── 4. Call Leopards API in chunks of 100 (batchBookPacketv2 limit) ──────────
+  const BATCH_SIZE = 100;
   const client = new LeopardApiClient({ storeId, settings });
-  const apiResult = await client.batchBookPacket(packetsToBook);
-
-  const dataArr = Array.isArray(apiResult.data)
-    ? apiResult.data
-    : Array.isArray(apiResult.raw?.data)
-      ? apiResult.raw.data
-      : [];
-
-  // Total failure with no per-packet data
-  if (!apiResult.ok && !dataArr.length) {
-    for (const { order, orderId } of orderContext) {
-      await db.shipment
-        .updateMany({
-          where: { storeId, shopifyOrderId: orderId },
-          data: { lastError: apiResult.message?.slice(0, 1000), bookingLockedAt: null },
-        })
-        .catch(() => {});
-      results.push({ orderId, orderName: order.name, ok: false, message: apiResult.message ?? "Batch booking failed." });
-    }
-    return { ok: false, message: apiResult.message ?? "Batch booking failed.", results };
-  }
-
-  // ── 5. Correlate results by booked_packet_order_id (NEVER by position) ───────
-  const byOrderName = new Map();
-  for (const item of dataArr) {
-    const key = item?.booked_packet_order_id ? String(item.booked_packet_order_id) : null;
-    if (key) byOrderName.set(key, item);
-  }
-
-  // ── 6. Persist each result + collect writeback tasks ─────────────────────────
   const writebackTasks = [];
 
-  for (let i = 0; i < orderContext.length; i++) {
-    const { order, destinationCity, orderId } = orderContext[i];
-    // Prefer ID-based lookup; fall back to positional only when no IDs were returned
-    const item = byOrderName.get(order.name) ?? (byOrderName.size === 0 ? dataArr[i] : undefined);
-    const trackNumber = item?.track_number;
-    const slipLink = item?.slip_link;
+  for (let ci = 0; ci < packetsToBook.length; ci += BATCH_SIZE) {
+    const chunkPackets = packetsToBook.slice(ci, ci + BATCH_SIZE);
+    const chunkContext = orderContext.slice(ci, ci + BATCH_SIZE);
 
-    if (!trackNumber) {
-      const rawError =
-        item?.error ??
-        apiResult.raw?.error?.[`bookPacket - ${i}`] ??
-        "Leopards rejected this packet.";
-      const errMsg = typeof rawError === "string" ? rawError : JSON.stringify(rawError);
-      await db.shipment
-        .updateMany({
-          where: { storeId, shopifyOrderId: orderId },
-          data: { lastError: errMsg.slice(0, 1000), bookingLockedAt: null },
-        })
-        .catch(() => {});
-      results.push({ orderId, orderName: order.name, ok: false, message: errMsg });
+    const apiResult = await client.batchBookPacket(chunkPackets);
+    const dataArr   = Array.isArray(apiResult.data)
+      ? apiResult.data
+      : Array.isArray(apiResult.raw?.data)
+        ? apiResult.raw.data
+        : [];
+
+    // Total failure for this chunk — mark all orders in it as failed and try next chunk
+    if (!apiResult.ok && !dataArr.length) {
+      for (const { order, orderId } of chunkContext) {
+        await db.shipment
+          .updateMany({
+            where: { storeId, shopifyOrderId: orderId },
+            data: { lastError: apiResult.message?.slice(0, 1000), bookingLockedAt: null },
+          })
+          .catch(() => {});
+        results.push({ orderId, orderName: order.name, ok: false, message: apiResult.message ?? "Batch booking failed." });
+      }
       continue;
     }
 
-    try {
-      const shipment = await db.$transaction(async (tx) => {
-        const s = await tx.shipment.update({
-          where: { storeId_shopifyOrderId: { storeId, shopifyOrderId: orderId } },
-          data: {
-            cnNumber:            trackNumber,
-            slipLink:            slipLink ?? null,
-            bookedPacketOrderId: item?.booked_packet_order_id || order.name,
-            status:              "BOOKED",
-            codAmount:           packetsToBook[i].booked_packet_collect_amount,
-            weightGrams:         packetsToBook[i].booked_packet_weight,
-            originCityId:        settings.originCityId,
-            destinationCityId:   destinationCity?.leopardCityId ?? null,
-            consigneeName:       order.customerName,
-            consigneePhone:      order.customerPhone,
-            consigneeAddress:    order.address,
-            cancelledAt:         null,
-            lastError:           null,
-            bookingLockedAt:     null,
-            bookedAt:            new Date(),
-          },
-        });
-        await tx.shipmentLog.create({
-          data: {
-            shipmentId: s.id,
-            eventType:  "BOOKED",
-            toStatus:   "BOOKED",
-            message:    `Batch booked with CN ${trackNumber}`,
-          },
-        });
-        return s;
-      });
+    // Correlate by booked_packet_order_id (never by position)
+    const byOrderName = new Map();
+    for (const item of dataArr) {
+      const key = item?.booked_packet_order_id ? String(item.booked_packet_order_id) : null;
+      if (key) byOrderName.set(key, item);
+    }
 
-      if (trackNumber && settings.fulfillmentWritebackEnabled) {
-        const taskOrderId = orderId;
-        writebackTasks.push(async () => {
-          const result = await writebackFulfillment(admin, order.id, trackNumber, slipLink, order.note);
-          if (!result.fulfilled) {
-            await db.shipment
-              .updateMany({ where: { storeId, shopifyOrderId: taskOrderId }, data: { writebackFailed: true } })
-              .catch((err) => console.error("[batch writeback] writebackFailed flag update failed:", err.message));
-          }
-        });
+    // Persist each result in the chunk
+    for (let i = 0; i < chunkContext.length; i++) {
+      const { order, destinationCity, orderId } = chunkContext[i];
+      const item        = byOrderName.get(order.name) ?? (byOrderName.size === 0 ? dataArr[i] : undefined);
+      const trackNumber = item?.track_number;
+      const slipLink    = item?.slip_link;
+
+      if (!trackNumber) {
+        const rawError =
+          item?.error ??
+          apiResult.raw?.error?.[`bookPacket - ${i}`] ??
+          "Leopards rejected this packet.";
+        const errMsg = typeof rawError === "string" ? rawError : JSON.stringify(rawError);
+        await db.shipment
+          .updateMany({
+            where: { storeId, shopifyOrderId: orderId },
+            data: { lastError: errMsg.slice(0, 1000), bookingLockedAt: null },
+          })
+          .catch(() => {});
+        results.push({ orderId, orderName: order.name, ok: false, message: errMsg });
+        continue;
       }
 
-      results.push({ orderId, orderName: order.name, cnNumber: trackNumber, ok: true, message: `Booked with CN ${trackNumber}` });
-    } catch (dbErr) {
-      console.error(`[bookOrdersBatch] DB commit failed for ${order.name}:`, dbErr);
-      await releaseLock(storeId, orderId);
-      results.push({ orderId, orderName: order.name, ok: false, message: "Failed to save booking. The CN may have been created — check with Leopards." });
+      try {
+        const shipment = await db.$transaction(async (tx) => {
+          const s = await tx.shipment.update({
+            where: { storeId_shopifyOrderId: { storeId, shopifyOrderId: orderId } },
+            data: {
+              cnNumber:            trackNumber,
+              slipLink:            slipLink ?? null,
+              bookedPacketOrderId: item?.booked_packet_order_id || order.name,
+              status:              "BOOKED",
+              codAmount:           chunkPackets[i].booked_packet_collect_amount,
+              weightGrams:         chunkPackets[i].booked_packet_weight,
+              originCityId:        settings.originCityId,
+              destinationCityId:   destinationCity?.leopardCityId ?? null,
+              consigneeName:       order.customerName,
+              consigneePhone:      order.customerPhone,
+              consigneeAddress:    order.address,
+              cancelledAt:         null,
+              lastError:           null,
+              bookingLockedAt:     null,
+              bookedAt:            new Date(),
+            },
+          });
+          await tx.shipmentLog.create({
+            data: {
+              shipmentId: s.id,
+              eventType:  "BOOKED",
+              toStatus:   "BOOKED",
+              message:    `Batch booked with CN ${trackNumber}`,
+            },
+          });
+          return s;
+        });
+
+        if (trackNumber && settings.fulfillmentWritebackEnabled) {
+          const taskOrderId = orderId;
+          writebackTasks.push(async () => {
+            const result = await writebackFulfillment(admin, order.id, trackNumber, slipLink, order.note);
+            if (!result.fulfilled) {
+              await db.shipment
+                .updateMany({ where: { storeId, shopifyOrderId: taskOrderId }, data: { writebackFailed: true } })
+                .catch((err) => console.error("[batch writeback] writebackFailed flag update failed:", err.message));
+            }
+          });
+        }
+
+        results.push({ orderId, orderName: order.name, cnNumber: trackNumber, ok: true, message: `Booked with CN ${trackNumber}` });
+      } catch (dbErr) {
+        console.error(`[bookOrdersBatch] DB commit failed for ${order.name}:`, dbErr);
+        await releaseLock(storeId, orderId);
+        results.push({ orderId, orderName: order.name, ok: false, message: "Failed to save booking. The CN may have been created — check with Leopards." });
+      }
     }
   }
 
