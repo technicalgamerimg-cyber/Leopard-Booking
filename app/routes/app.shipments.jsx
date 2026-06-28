@@ -19,14 +19,15 @@ export const loader = async ({ request }) => {
   const { session } = await authenticate.admin(request);
   const store = await ensureStore(session);
   const url   = new URL(request.url);
-  const query  = url.searchParams.get("query") ?? "";
+  const query  = url.searchParams.get("query")  ?? "";
+  const status = url.searchParams.get("status") ?? "";  // "" = all active statuses
   const page   = Number(url.searchParams.get("page") ?? "1");
   const limit  = 50;
 
   const cutoff24h = new Date(Date.now() - 24 * 60 * 60 * 1000);
 
   const [{ shipments, total, pageCount }, recentLoadsheets, brokenShipments] = await Promise.all([
-    listShipments(store.id, "BOOKED", query, page, limit),
+    listShipments(store.id, status, query, page, limit),
     db.loadsheet.findMany({
       where: { storeId: store.id, createdAt: { gte: cutoff24h } },
       orderBy: { createdAt: "desc" },

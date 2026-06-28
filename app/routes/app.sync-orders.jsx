@@ -5,7 +5,6 @@ import db from "../db.server";
 import { codFromFinancialStatus } from "../lib/cod.server";
 
 const PAGE_SIZE = 250;
-const CLOSED_ORDERS_DAYS = 90;
 
 const SYNC_ORDERS_QUERY = `#graphql
   query SyncOrders($cursor: String, $query: String) {
@@ -43,11 +42,7 @@ export const action = async ({ request }) => {
   const formData = await request.formData();
   const cursor   = formData.get("cursor") || null; // null = start from beginning
 
-  const ninetyDaysAgo = new Date(Date.now() - CLOSED_ORDERS_DAYS * 24 * 60 * 60 * 1000)
-    .toISOString()
-    .split("T")[0]; // YYYY-MM-DD
-
-  const shopifyQuery = `status:open OR (updated_at:>${ninetyDaysAgo})`;
+  const shopifyQuery = `status:open`;
 
   let response;
   try {

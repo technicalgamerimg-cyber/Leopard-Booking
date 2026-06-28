@@ -688,29 +688,24 @@ export default function Orders() {
           <div className="lb-empty">
             <span className="lb-empty-icon">🛒</span>
             <div className="lb-empty-title">
-              {isSyncing
-                ? `Syncing orders… (${syncedCountRef.current} pulled so far)`
-                : query
-                  ? `No orders matching "${query}"`
-                  : "Sync your Shopify orders"}
+              {query ? `No orders matching "${query}"` : "Sync your Shopify orders"}
             </div>
             <div className="lb-empty-desc">
-              {isSyncing
-                ? "Fetching orders from Shopify and saving to database…"
-                : query
-                  ? "Try a different search term."
-                  : "Pull your store's orders into the app to start booking with Leopards Courier."}
+              {query
+                ? "Try a different search term."
+                : "Pull your store's orders into the app to start booking with Leopards Courier."}
             </div>
-            {!isSyncing && !query && (
+            {!query && (
               <button
                 onClick={startSync}
+                disabled={isSyncing}
                 className="lb-btn lb-btn-primary"
                 style={{ display: "inline-flex", marginTop: 20 }}
               >
-                Sync Shopify Orders
+                {isSyncing ? "Syncing…" : "Sync Shopify Orders"}
               </button>
             )}
-            {!isSyncing && query && (
+            {query && (
               <a href="/app/orders" className="lb-btn lb-btn-primary" style={{ display: "inline-flex", marginTop: 16 }}>
                 Clear search
               </a>
