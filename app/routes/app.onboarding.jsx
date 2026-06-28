@@ -491,7 +491,6 @@ function StepAllDone() {
       <div style={{ display: "flex", justifyContent: "center", gap: 24, flexWrap: "wrap" }}>
         {[
           { to: "/app/shipments", label: "View Shipments" },
-          { to: "/app/loadsheets", label: "Create Loadsheet" },
           { to: "/app", label: "Open Dashboard" },
         ].map((link) => (
           <Link

@@ -68,12 +68,12 @@ function Toggle({ checked, onChange, label, description }) {
   );
 }
 
-function SettingsCard({ title, subtitle, children, danger }) {
+function SettingsCard({ title, subtitle, children }) {
   return (
-    <div className={`lb-settings-card${danger ? " lb-danger-zone" : ""}`}>
+    <div className="lb-settings-card">
       <div className="lb-settings-card-header">
-        <div style={{ fontWeight: 700, fontSize: 14, color: danger ? "#7f0007" : "#202223" }}>{title}</div>
-        {subtitle && <div style={{ fontSize: 12, color: danger ? "#b40007" : "#6d7175", marginTop: 2 }}>{subtitle}</div>}
+        <div style={{ fontWeight: 700, fontSize: 14, color: "#202223" }}>{title}</div>
+        {subtitle && <div style={{ fontSize: 12, color: "#6d7175", marginTop: 2 }}>{subtitle}</div>}
       </div>
       <div className="lb-settings-card-body">
         {children}
@@ -219,6 +219,41 @@ export default function Settings() {
               <div style={{ fontSize: 12, color: "#8c9196", marginTop: 6 }}>Save credentials above before testing.</div>
             )}
           </div>
+
+          {/* Disconnect */}
+          <div style={{ marginTop: 12, paddingTop: 12, borderTop: "1px solid #f1f2f4" }}>
+            {!clearConfirm ? (
+              <s-button
+                tone="critical"
+                disabled={credBusy || !settings.hasCredentials}
+                onClick={() => setClearConfirm(true)}
+              >
+                Disconnect API
+              </s-button>
+            ) : (
+              <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                <div style={{ fontSize: 13, color: "#7f0007" }}>Remove saved API credentials?</div>
+                <div style={{ display: "flex", gap: 8 }}>
+                  <credFetcher.Form method="post" style={{ display: "contents" }}>
+                    <input type="hidden" name="intent" value="clear" />
+                    <s-button
+                      type="submit"
+                      tone="critical"
+                      disabled={credBusy}
+                      loading={credBusy && credFetcher.formData?.get("intent") === "clear"}
+                      onClick={() => setTimeout(() => setClearConfirm(false), 0)}
+                    >
+                      Yes, disconnect
+                    </s-button>
+                  </credFetcher.Form>
+                  <s-button onClick={() => setClearConfirm(false)} disabled={credBusy}>Cancel</s-button>
+                </div>
+              </div>
+            )}
+            {!settings.hasCredentials && (
+              <div style={{ fontSize: 12, color: "#8c9196", marginTop: 6 }}>No credentials stored.</div>
+            )}
+          </div>
         </SettingsCard>
       </s-section>
 
@@ -337,49 +372,6 @@ export default function Settings() {
               </div>
             </div>
           </defaultsFetcher.Form>
-        </SettingsCard>
-      </s-section>
-
-      {/* ── Danger zone ── */}
-      <s-section heading="Danger zone">
-        <SettingsCard
-          title="Clear API credentials"
-          subtitle="Permanently removes your stored Leopards API key and password. All booking operations will stop immediately until new credentials are saved."
-          danger
-        >
-          {!clearConfirm ? (
-            <s-button
-              tone="critical"
-              disabled={credBusy || !settings.hasCredentials}
-              onClick={() => setClearConfirm(true)}
-            >
-              Clear credentials
-            </s-button>
-          ) : (
-            <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-              <div style={{ fontSize: 13, color: "#7f0007", fontWeight: 600 }}>
-                Are you sure? This action cannot be undone. You will need to re-enter your API credentials to book shipments.
-              </div>
-              <div style={{ display: "flex", gap: 8 }}>
-                <credFetcher.Form method="post" style={{ display: "contents" }}>
-                  <input type="hidden" name="intent" value="clear" />
-                  <s-button
-                    type="submit"
-                    tone="critical"
-                    disabled={credBusy}
-                    loading={credBusy && credFetcher.formData?.get("intent") === "clear"}
-                    onClick={() => setTimeout(() => setClearConfirm(false), 0)}
-                  >
-                    Yes, clear credentials
-                  </s-button>
-                </credFetcher.Form>
-                <s-button onClick={() => setClearConfirm(false)} disabled={credBusy}>Cancel</s-button>
-              </div>
-            </div>
-          )}
-          {!settings.hasCredentials && (
-            <div style={{ marginTop: 8, fontSize: 12, color: "#8c9196" }}>No credentials are currently stored.</div>
-          )}
         </SettingsCard>
       </s-section>
 

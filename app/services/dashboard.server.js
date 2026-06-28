@@ -5,7 +5,7 @@ export async function getDashboard(storeId) {
   const todayStart = new Date();
   todayStart.setHours(0, 0, 0, 0);
 
-  const [shipments, awaitingBooking, failedBookings, bookedToday, recentLogs, recentLoadsheets, settings] =
+  const [shipments, awaitingBooking, failedBookings, bookedToday, recentLogs, settings] =
     await Promise.all([
       db.shipment.groupBy({
         by: ["status"],
@@ -32,11 +32,6 @@ export async function getDashboard(storeId) {
         },
         orderBy: { createdAt: "desc" },
         take: 8,
-      }),
-      db.loadsheet.findMany({
-        where: { storeId },
-        orderBy: { createdAt: "desc" },
-        take: 5,
       }),
       getSettings(storeId),
     ]);
@@ -71,13 +66,6 @@ export async function getDashboard(storeId) {
       eventType: log.eventType,
       message: log.message,
       createdAt: log.createdAt.toISOString(),
-    })),
-    recentLoadsheets: recentLoadsheets.map((ls) => ({
-      id: ls.id,
-      loadSheetId: ls.loadSheetId,
-      cnCount: ls.cnCount,
-      status: ls.status,
-      createdAt: ls.createdAt.toISOString(),
     })),
   };
 }

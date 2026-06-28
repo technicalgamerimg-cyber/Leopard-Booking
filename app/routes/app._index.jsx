@@ -1,7 +1,5 @@
-import { useState } from "react";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { redirect, useLoaderData, useRouteError } from "react-router";
-import { useAppBridge } from "@shopify/app-bridge-react";
 import { authenticate } from "../shopify.server";
 import { ensureStore } from "../services/store.server";
 import { getSettings, isOnboardingComplete } from "../services/settings.server";
@@ -99,35 +97,7 @@ export default function Dashboard() {
     hasCredentials,
     hasOriginCity,
     recentLogs,
-    recentLoadsheets,
   } = useLoaderData();
-
-  const shopify = useAppBridge();
-  const [downloadingId, setDownloadingId] = useState(null);
-
-  async function handleDownload(loadSheetId) {
-    setDownloadingId(loadSheetId);
-    try {
-      const res = await fetch(`/app/loadsheets/download?loadSheetId=${encodeURIComponent(loadSheetId)}`);
-      if (!res.ok) throw new Error(await res.text());
-      const blob = await res.blob();
-      const url = URL.createObjectURL(blob);
-      const win = window.open(url, "_blank");
-      if (win) {
-        setTimeout(() => URL.revokeObjectURL(url), 30_000);
-      } else {
-        const a = document.createElement("a");
-        a.href = url;
-        a.download = `loadsheet-${loadSheetId}.pdf`;
-        a.click();
-        setTimeout(() => URL.revokeObjectURL(url), 5_000);
-      }
-    } catch {
-      shopify.toast.show("Could not download load sheet.", { isError: true });
-    } finally {
-      setDownloadingId(null);
-    }
-  }
 
   const needsAttentionCount = (awaitingBooking ?? 0) + (failedBookings ?? 0) + (counts.EXCEPTION ?? 0);
   const inFlightCount = (counts.BOOKED ?? 0) + (counts.IN_TRANSIT ?? 0);
@@ -238,7 +208,6 @@ export default function Dashboard() {
         <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
           <QuickActionBtn href="/app/orders" primary>Book orders</QuickActionBtn>
           <QuickActionBtn href="/app/shipments">View shipments</QuickActionBtn>
-          <QuickActionBtn href="/app/loadsheets">Generate loadsheet</QuickActionBtn>
           <QuickActionBtn href="/app/settings">Settings</QuickActionBtn>
         </div>
       </s-section>
@@ -295,40 +264,6 @@ export default function Dashboard() {
           </div>
         )}
       </s-section>
-
-      {/* ── Recent load sheets ── */}
-      {recentLoadsheets?.length > 0 && (
-        <s-section heading="Recent load sheets">
-          <div className="lb-card">
-            {recentLoadsheets.map((ls) => (
-              <div key={ls.id} className="lb-list-row">
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <div className="lb-mono" style={{ fontWeight: 600, fontSize: 13, color: "#202223" }}>{ls.loadSheetId}</div>
-                  <div style={{ fontSize: 12, color: "#6d7175", marginTop: 2 }}>
-                    {ls.cnCount} shipment{ls.cnCount !== 1 ? "s" : ""} · {new Date(ls.createdAt).toLocaleDateString()}
-                  </div>
-                </div>
-                <span className="lb-pill" style={{ background: ls.status === "downloaded" ? "#e3f1df" : "#eaf4fb", color: ls.status === "downloaded" ? "#1e542a" : "#084e8a", borderColor: "transparent" }}>
-                  {ls.status === "downloaded" ? "Downloaded" : "Generated"}
-                </span>
-                <button
-                  onClick={() => handleDownload(ls.loadSheetId)}
-                  disabled={downloadingId === ls.loadSheetId}
-                  className="lb-btn lb-btn-secondary lb-btn-sm"
-                  style={{ opacity: downloadingId === ls.loadSheetId ? 0.6 : 1 }}
-                >
-                  {downloadingId === ls.loadSheetId ? "…" : "Download PDF"}
-                </button>
-              </div>
-            ))}
-            <div style={{ padding: "10px 16px", background: "var(--lb-surface-muted)", borderTop: "1px solid var(--lb-border)" }}>
-              <a href="/app/loadsheets" style={{ fontSize: 13, color: "var(--lb-primary)", fontWeight: 600, textDecoration: "none" }}>
-                View all load sheets →
-              </a>
-            </div>
-          </div>
-        </s-section>
-      )}
 
     </s-page>
   );

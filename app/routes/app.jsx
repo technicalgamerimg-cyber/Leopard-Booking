@@ -14,7 +14,6 @@ const NAV_ITEMS = [
   { href: "/app", label: "Dashboard", match: (p) => p === "/app" },
   { href: "/app/orders", label: "Orders", match: (p) => p.startsWith("/app/orders") },
   { href: "/app/shipments", label: "Shipments", match: (p) => p.startsWith("/app/shipments") },
-  { href: "/app/loadsheets", label: "Loadsheets", match: (p) => p.startsWith("/app/loadsheets") },
   { href: "/app/settings", label: "Settings", match: (p) => p.startsWith("/app/settings") },
 ];
 

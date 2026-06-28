@@ -46,11 +46,6 @@ export default function App() {
             on-demand, with delivered and cancelled events written back to
             Shopify fulfillments.
           </li>
-          <li>
-            <strong>Daily loadsheets</strong>. Generate and download
-            consolidated pickup loadsheets as PDFs whenever your courier
-            arrives.
-          </li>
         </ul>
       </div>
     </div>
