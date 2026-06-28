@@ -76,6 +76,48 @@ function encodeJsonBody(payload) {
   return JSON.stringify(payload);
 }
 
+function safeParseJson(text, httpStatus, contentType = "", endpoint = "") {
+  if (!text) return { json: {}, parseError: null };
+
+  const isJson = contentType.toLowerCase().includes("application/json");
+
+  if (!isJson) {
+    console.warn(
+      `[leopards] ${endpoint} non-JSON response | HTTP ${httpStatus} | content-type: ${contentType} | preview: ${text.slice(0, 500)}`
+    );
+    return {
+      json: null,
+      parseError: {
+        ok: false,
+        code: "LEOPARDS_INVALID_RESPONSE",
+        message:
+          "Leopards API returned an unexpected response instead of JSON. " +
+          "This usually indicates a temporary API issue, authentication problem, or an upstream proxy error.",
+        httpStatus,
+        leopardStatus: null,
+      },
+    };
+  }
+
+  try {
+    return { json: JSON.parse(text), parseError: null };
+  } catch {
+    console.warn(
+      `[leopards] ${endpoint} JSON parse failed | HTTP ${httpStatus} | preview: ${text.slice(0, 500)}`
+    );
+    return {
+      json: null,
+      parseError: {
+        ok: false,
+        code: "LEOPARDS_INVALID_RESPONSE",
+        message: `Leopards API returned unparseable data (HTTP ${httpStatus ?? "?"}).`,
+        httpStatus,
+        leopardStatus: null,
+      },
+    };
+  }
+}
+
 export class LeopardApiClient {
   constructor({ storeId, settings }) {
     this.storeId = storeId;
@@ -108,8 +150,13 @@ export class LeopardApiClient {
           await new Promise((r) => setTimeout(r, 1000 * 2 ** attempt));
           continue;
         }
+        const contentType = response.headers.get("content-type") ?? "";
         const text = await response.text();
-        const json = text ? JSON.parse(text) : {};
+        const { json, parseError } = safeParseJson(text, httpStatus, contentType, endpoint);
+        if (parseError) {
+          await this.logCall(endpoint, parseError, 0, attempt);
+          return parseError;
+        }
         const result = normalizeJson(endpoint, json, httpStatus);
         await this.logCall(endpoint, result, 0, attempt);
         return result;
@@ -194,7 +241,12 @@ export class LeopardApiClient {
         }
 
         const text = await response.text();
-        const json = text ? JSON.parse(text) : {};
+        const { json, parseError } = safeParseJson(text, httpStatus, responseContentType, endpoint);
+        if (parseError) {
+          if (httpStatus !== null && httpStatus >= 500) leopardBreaker.recordFailure();
+          result = parseError;
+          break;
+        }
         result = normalizeJson(endpoint, json, httpStatus);
         // HTTP 2xx/4xx = infrastructure is alive; reset breaker
         if (httpStatus < 500) leopardBreaker.recordSuccess();
@@ -308,7 +360,11 @@ export class LeopardApiClient {
         return result;
       }
       const text = await response.text();
-      const json = text ? JSON.parse(text) : {};
+      const { json, parseError } = safeParseJson(text, httpStatus, ct, endpoint);
+      if (parseError) {
+        await this.logCall(endpoint, parseError, 0, 0);
+        return parseError;
+      }
       const result = normalizeJson(endpoint, json, httpStatus);
       await this.logCall(endpoint, result, 0, 0);
       return result;
