@@ -89,80 +89,18 @@ function QuickActionBtn({ href, children, primary }) {
 }
 
 export default function Dashboard() {
-  const {
-    counts,
-    awaitingBooking,
-    failedBookings,
-    bookedToday,
-    hasCredentials,
-    hasOriginCity,
-    recentLogs,
-  } = useLoaderData();
-
-  const needsAttentionCount = (awaitingBooking ?? 0) + (failedBookings ?? 0) + (counts.EXCEPTION ?? 0);
-  const inFlightCount = (counts.BOOKED ?? 0) + (counts.IN_TRANSIT ?? 0);
+  const { counts, bookedToday, cancelledToday, bookedAllTime, recentLogs } = useLoaderData();
 
   return (
     <s-page heading="Dashboard">
 
-      {/* ── Needs attention alert ── */}
-      {needsAttentionCount > 0 && (
-        <s-section>
-          <div style={{ background: "#fce8e7", border: "1px solid #d72c0d", borderRadius: 8, padding: "14px 18px", display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 12 }}>
-            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-              <span style={{ fontSize: 20 }}>🔴</span>
-              <div>
-                <div style={{ fontWeight: 700, fontSize: 14, color: "#7f0007" }}>
-                  {needsAttentionCount} shipment{needsAttentionCount !== 1 ? "s" : ""} need attention
-                </div>
-                <div style={{ fontSize: 12, color: "#b40007", marginTop: 2 }}>
-                  {[
-                    awaitingBooking > 0 && `${awaitingBooking} unbooked`,
-                    failedBookings > 0 && `${failedBookings} booking failed`,
-                    counts.EXCEPTION > 0 && `${counts.EXCEPTION} exception${counts.EXCEPTION > 1 ? "s" : ""}`,
-                  ].filter(Boolean).join(" · ")}
-                </div>
-              </div>
-            </div>
-            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-              {(awaitingBooking > 0 || failedBookings > 0) && (
-                <Link to="/app/orders" style={{ padding: "7px 14px", background: "#d72c0d", color: "#fff", borderRadius: 6, fontSize: 13, fontWeight: 600, textDecoration: "none" }}>
-                  Book now →
-                </Link>
-              )}
-              {counts.EXCEPTION > 0 && (
-                <Link to="/app/orders" style={{ padding: "7px 14px", background: "#fff", color: "#d72c0d", border: "1px solid #d72c0d", borderRadius: 6, fontSize: 13, fontWeight: 600, textDecoration: "none" }}>
-                  Go to Orders
-                </Link>
-              )}
-            </div>
-          </div>
-        </s-section>
-      )}
-
-      {/* ── Primary KPI row ── */}
-      <s-section heading="Today's performance">
+      {/* ── Overview KPIs ── */}
+      <s-section heading="Overview">
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", gap: 12 }}>
-          <MetricCard label="Booked today" value={bookedToday} color="#3d8b40" sublabel="new bookings" href="/app/shipments" />
-          <MetricCard label="In transit" value={inFlightCount} color="#5c6ac4" sublabel="active shipments" />
-          <MetricCard label="Delivered" value={counts.DELIVERED} color="#3d8b40" sublabel="all time" />
-          <MetricCard
-            label="Need booking"
-            value={(awaitingBooking ?? 0) + (failedBookings ?? 0)}
-            color={(awaitingBooking ?? 0) + (failedBookings ?? 0) > 0 ? "#d72c0d" : "#8c9196"}
-            sublabel="pending orders"
-            href="/app/orders"
-          />
-        </div>
-      </s-section>
-
-      {/* ── Secondary KPI row ── */}
-      <s-section heading="All-time breakdown">
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(130px, 1fr))", gap: 10 }}>
-          <MetricCard label="Total" value={counts.total} color="#5c6ac4" />
-          <MetricCard label="Returned" value={counts.RETURNED} color="#e8912d" />
-          <MetricCard label="Cancelled" value={counts.CANCELLED} color="#8c9196" />
-          <MetricCard label="Exceptions" value={counts.EXCEPTION} color={counts.EXCEPTION > 0 ? "#d72c0d" : "#8c9196"} />
+          <MetricCard label="Booked today"      value={bookedToday}       color="#2c6ecb" sublabel="new bookings today"  href="/app/shipments" />
+          <MetricCard label="Cancelled today"   value={cancelledToday}    color="#d72c0d" sublabel="cancellations today" />
+          <MetricCard label="Booked all time"   value={bookedAllTime}     color="#3d8b40" sublabel="total ever booked"   href="/app/shipments" />
+          <MetricCard label="Cancelled all time" value={counts.CANCELLED} color="#8c9196" sublabel="total cancelled" />
         </div>
       </s-section>
 

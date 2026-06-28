@@ -40,11 +40,48 @@ enum WebhookStatus {
   dead_letter
 }
 
+// Expanded to cover all observable events across the booking lifecycle.
 enum ShipmentEvent {
   BOOKED
+  BOOKING_FAILED
   CANCELLED
   STATUS_CHANGE
   ERROR
+  LEOPARD_BOOKED
+  LEOPARD_CANCELLED
+  SHOPIFY_FULFILLMENT_CREATED
+  SHOPIFY_FULFILLMENT_CANCELLED
+  WEBHOOK_RECEIVED
+  MANUAL_BOOK_ANYWAY
+  PENDING_CANCELLATION_SET
+  PENDING_CANCELLATION_EXECUTED
+  SYNC_RETRY
+  SYNC_FIXED
+  SYNC_FAILED_PERMANENTLY
+}
+
+// Shopify writeback failures — two chains so Shopify and Leopards failures are never mixed.
+enum ShopifySyncStatus {
+  SYNC_OK
+  FULFILLMENT_FAILED
+  CANCEL_FAILED
+  TRACKING_FAILED
+  FAILED_PERMANENTLY
+}
+
+enum LeopardSyncStatus {
+  SYNC_OK
+  BOOKING_FAILED
+  CANCEL_FAILED
+  FAILED_PERMANENTLY
+}
+
+// Who created the active Shopify fulfillment for this order.
+enum FulfillmentSource {
+  OUR_APP
+  SHOPIFY_ADMIN
+  THIRD_PARTY
+  UNKNOWN
 }
 
 model Session {
@@ -68,15 +105,16 @@ model Session {
 }
 
 model Store {
-  id            String    @id @default(cuid())
-  shopDomain    String    @unique
-  accessToken   String
-  scopes        String?
-  isActive      Boolean   @default(true)
-  installedAt   DateTime  @default(now())
-  uninstalledAt DateTime?
-  createdAt     DateTime  @default(now())
-  updatedAt     DateTime  @updatedAt
+  id                  String    @id @default(cuid())
+  shopDomain          String    @unique
+  accessToken         String
+  scopes              String?
+  isActive            Boolean   @default(true)
+  installedAt         DateTime  @default(now())
+  uninstalledAt       DateTime?
+  lastOrderSyncCursor String?   // GraphQL cursor for resumable order sync
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
 
   settings    Settings?
   shipments   Shipment[]
@@ -108,40 +146,94 @@ model Settings {
 }
 
 model Shipment {
-  id                  String          @id @default(cuid())
-  storeId             String
-  store               Store           @relation(fields: [storeId], references: [id], onDelete: Cascade)
-  shopifyOrderId      String
-  shopifyOrderName    String
+  id      String @id @default(cuid())
+  storeId String
+  store   Store  @relation(fields: [storeId], references: [id], onDelete: Cascade)
+
+  // Version for optimistic concurrency — every write must increment this.
+  version Int @default(1)
+
+  // ── Shopify-sourced ───────────────────────────────────────────────────────
+  // Mirror of Shopify order data. Updated by webhooks only.
+  // financialStatus and totalPrice must never be used to change codAmount post-booking.
+  shopifyOrderId   String
+  shopifyOrderName String
+  shopifyCreatedAt DateTime @default(now())
+  financialStatus  String   @default("PENDING")
+  totalPrice       Int      @default(0)        // raw order total in smallest currency unit; COD pre-fill source
+  note             String?
+  lineItemsCount   Int      @default(1)
+  shopifyDeletedAt DateTime?                   // soft-delete only; never hard-delete
+
+  // ── Consignee / logistics ─────────────────────────────────────────────────
+  consigneeName    String
+  consigneePhone   String
+  consigneeAddress String
+
+  // ── Booking state (owned by our DB) ──────────────────────────────────────
+  status    ShipmentStatus @default(PENDING)
+  codAmount Int            @default(0)  // LOCKED at booking; never updated post-booking
+  weightGrams   Int        @default(1000)
+  noOfPieces    Int        @default(1)
+  originCityId  Int?
+  destinationCityId Int?
+  bookedAt    DateTime?
+  cancelledAt DateTime?
+  deliveredAt DateTime?
+  lastError   String?
+
+  // Set by cancel webhook when bookingLockedAt is active; booking service checks this post-commit.
+  pendingCancellation Boolean @default(false)
+
+  // Set when Shopify fulfillment is removed externally while a live CN exists.
+  // Requires explicit merchant action — NOT auto-resolved.
+  shopifySyncBroken Boolean @default(false)
+
+  // ── Booking lock (true mutex) ─────────────────────────────────────────────
+  // Only the process that set bookingLockId may release the lock.
+  bookingLockedAt DateTime?
+  bookingLockId   String?
+
+  // ── Shopify sync status ───────────────────────────────────────────────────
+  shopifySyncStatus ShopifySyncStatus @default(SYNC_OK)
+  shopifyRetryCount Int               @default(0)
+  shopifyRetryAfter DateTime?
+  ourFulfillmentId  String?           // Shopify fulfillment GID created by our app
+
+  // ── Leopards sync status ──────────────────────────────────────────────────
+  leopardSyncStatus LeopardSyncStatus @default(SYNC_OK)
+  leopardRetryCount Int               @default(0)
+  leopardRetryAfter DateTime?
+
+  // ── Leopards fields ───────────────────────────────────────────────────────
+  // Set from Leopards API response. Never overwritten once populated.
   cnNumber            String?
   slipLink            String?
   bookedPacketOrderId String?
-  status              ShipmentStatus  @default(PENDING)
   leopardStatusRaw    String?
-  codAmount           Int             @default(0)
-  weightGrams         Int
-  noOfPieces          Int             @default(1)
-  originCityId        Int?
-  destinationCityId   Int?
-  consigneeName       String
-  consigneePhone      String
-  consigneeAddress    String
-  lastError           String?
-  writebackFailed     Boolean         @default(false)
-  bookingLockedAt     DateTime?
-  bookedAt            DateTime?
-  deliveredAt         DateTime?
-  cancelledAt         DateTime?
-  createdAt           DateTime        @default(now())
-  updatedAt           DateTime        @updatedAt
+
+  // ── External fulfillment audit ────────────────────────────────────────────
+  // Never cleared — permanent audit trail even after "Book Anyway" or cancellation.
+  externalFulfillmentSource     FulfillmentSource?
+  externalFulfillmentId         String?
+  externalTrackingNumber        String?
+  externalFulfillmentDetectedAt DateTime?
 
   logs       ShipmentLog[]
   loadsheets LoadsheetShipment[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   @@unique([storeId, shopifyOrderId])
   @@unique([storeId, cnNumber])
   @@index([storeId, status])
   @@index([storeId, bookedAt])
+  @@index([storeId, shopifyDeletedAt])
+  @@index([shopifySyncStatus])
+  @@index([leopardSyncStatus])
+  @@index([shopifyRetryAfter])
+  @@index([leopardRetryAfter])
 }
 
 model Loadsheet {

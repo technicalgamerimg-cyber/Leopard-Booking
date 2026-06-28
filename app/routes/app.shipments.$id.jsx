@@ -279,11 +279,20 @@ export default function ShipmentDetail() {
           </div>
         </s-section>
       )}
-      {shipment.writebackFailed && (
+      {shipment.shopifySyncStatus && shipment.shopifySyncStatus !== "SYNC_OK" && (
         <s-section>
           <div className="lb-alert lb-alert-warning" style={{ flexDirection: "column", alignItems: "stretch" }}>
-            <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 4 }}>⚠ Shopify fulfillment not synced</div>
-            <div style={{ fontSize: 13 }}>This shipment was booked in Leopards but Shopify was not updated. Go to the order in Shopify Admin and mark it as fulfilled with CN {shipment.cnNumber}.</div>
+            <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 4 }}>
+              {shipment.shopifySyncStatus === "FAILED_PERMANENTLY"
+                ? "⛔ Shopify sync failed permanently"
+                : "⚠ Shopify fulfillment not synced"}
+            </div>
+            <div style={{ fontSize: 13 }}>
+              {shipment.shopifySyncStatus === "FAILED_PERMANENTLY"
+                ? `Sync has failed after maximum retry attempts. Go to Shopify Admin and manually mark order ${shipment.shopifyOrderName} as fulfilled with CN ${shipment.cnNumber}.`
+                : `This shipment was booked in Leopards but Shopify was not updated (status: ${shipment.shopifySyncStatus}). A retry is scheduled.`
+              }
+            </div>
           </div>
         </s-section>
       )}

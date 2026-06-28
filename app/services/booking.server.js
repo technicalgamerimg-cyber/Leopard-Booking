@@ -1,3 +1,4 @@
+import { randomUUID } from "crypto";
 import db from "../db.server";
 import { LeopardApiClient } from "../integrations/leopards/client.server";
 import {
@@ -7,8 +8,10 @@ import {
   validateBookingPayload,
 } from "../lib/validation.server";
 import { resolveCity, batchResolveCitiesInMemory } from "./city.server";
-import { getSettings, getCodKeywords } from "./settings.server";
+import { getSettings } from "./settings.server";
 import { getOrder } from "./shopify-orders.server";
+import { codFromFinancialStatus } from "../lib/cod.server";
+import { cancelShipments } from "./shipment.server";
 
 // ── Shopify GraphQL ──────────────────────────────────────────────────────────
 
@@ -58,45 +61,22 @@ const FULFILLMENT_TRACKING_UPDATE_MUTATION = `#graphql
   }
 `;
 
-const ORDER_UPDATE_MUTATION = `#graphql
-  mutation OrderUpdate($input: OrderInput!) {
-    orderUpdate(input: $input) {
-      order { id note }
-      userErrors { field message }
-    }
-  }
-`;
-
 // ── Booking lock constants ───────────────────────────────────────────────────
 
-const LOCK_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes; stale locks auto-expire
+const LOCK_TIMEOUT_MS = 5 * 60 * 1000;
+
+// Exponential retry delay in milliseconds indexed by retry count (0-based)
+const RETRY_DELAYS_MS = [
+  15 * 60 * 1000,   // 1st failure  → retry after 15 min
+  60 * 60 * 1000,   // 2nd failure  → retry after 1 hour
+  6 * 60 * 60 * 1000, // 3rd failure → retry after 6 hours
+  24 * 60 * 60 * 1000, // 4th failure → retry after 24 hours
+];
+const MAX_RETRIES = 5; // after this → FAILED_PERMANENTLY
 
 // ── Private helpers ──────────────────────────────────────────────────────────
 
-async function writeOrderNote(admin, orderId, cnNumber, existingNote = "") {
-  try {
-    const cnLine = `Leopards CN: ${cnNumber}`;
-    const updatedNote =
-      existingNote && /Leopards CN:/i.test(existingNote)
-        ? existingNote.replace(/Leopards CN:.*$/im, cnLine)
-        : existingNote
-          ? `${existingNote.trim()}\n${cnLine}`
-          : cnLine;
-
-    const response = await admin.graphql(ORDER_UPDATE_MUTATION, {
-      variables: { input: { id: orderId, note: updatedNote } },
-    });
-    const json = await response.json();
-    const errors = json.data?.orderUpdate?.userErrors ?? [];
-    if (errors.length) {
-      console.error("[order note] orderUpdate errors:", JSON.stringify(errors));
-    }
-  } catch (err) {
-    console.error("[order note] Unexpected error:", err);
-  }
-}
-
-async function writebackFulfillment(admin, orderId, cnNumber, slipLink, existingNote = "") {
+async function writebackFulfillment(admin, orderId, cnNumber, slipLink) {
   try {
     const foResponse = await admin.graphql(FULFILLMENT_ORDERS_QUERY, {
       variables: { orderId },
@@ -115,9 +95,7 @@ async function writebackFulfillment(admin, orderId, cnNumber, slipLink, existing
         fulfillmentOrders.every((fo) => fo.status === "CLOSED");
 
       if (allClosed) {
-        // Order is already fulfilled in Shopify — not a failure.
-        // Attempt to attach tracking when there is exactly one FO (unambiguous target).
-        // Multiple FOs are skipped to avoid updating the wrong fulfillment.
+        // Already fulfilled — attempt to attach tracking when there is exactly one FO.
         if (fulfillmentOrders.length === 1) {
           const existingFulfillmentId = fulfillmentOrders[0]?.fulfillments?.nodes?.[0]?.id;
           if (existingFulfillmentId) {
@@ -139,10 +117,7 @@ async function writebackFulfillment(admin, orderId, cnNumber, slipLink, existing
                   orderId, cnNumber, updateErrors,
                 });
               } else {
-                console.log("[fulfillment writeback] tracking updated on existing fulfillment", {
-                  orderId, fulfillmentId: existingFulfillmentId,
-                });
-                await writeOrderNote(admin, orderId, cnNumber, existingNote);
+                return { fulfilled: true, fulfillmentId: existingFulfillmentId };
               }
             } catch (err) {
               console.warn("[fulfillment writeback] tracking update threw (non-fatal)", {
@@ -151,22 +126,20 @@ async function writebackFulfillment(admin, orderId, cnNumber, slipLink, existing
             }
           }
         } else {
-          console.log("[fulfillment writeback] multiple CLOSED FOs — skipping tracking update to avoid attaching to wrong fulfillment", {
+          console.log("[fulfillment writeback] multiple CLOSED FOs — skipping tracking update", {
             orderId, foCount: fulfillmentOrders.length,
           });
         }
-
-        return { fulfilled: true };
+        return { fulfilled: true, fulfillmentId: null };
       }
 
-      const reason = "No open fulfillment order found";
       console.warn("[fulfillment writeback] no fulfillable order found", {
         orderId,
         fulfillmentOrders: fulfillmentOrders.map((fo) => ({
           id: fo.id, status: fo.status, supportedActions: fo.supportedActions,
         })),
       });
-      return { fulfilled: false, reason };
+      return { fulfilled: false, reason: "No open fulfillment order found" };
     }
 
     const createResponse = await admin.graphql(FULFILLMENT_CREATE_MUTATION, {
@@ -174,8 +147,8 @@ async function writebackFulfillment(admin, orderId, cnNumber, slipLink, existing
         fulfillment: {
           lineItemsByFulfillmentOrder: [{ fulfillmentOrderId: openFo.id }],
           trackingInfo: {
-            number: cnNumber,
-            url: slipLink || `https://leopardscourier.com/track?cn=${cnNumber}`,
+            number:  cnNumber,
+            url:     slipLink || `https://leopardscourier.com/track?cn=${cnNumber}`,
             company: "Leopards Courier",
           },
           notifyCustomer: false,
@@ -184,17 +157,15 @@ async function writebackFulfillment(admin, orderId, cnNumber, slipLink, existing
     });
 
     const createJson = await createResponse.json();
-    const errors = createJson.data?.fulfillmentCreate?.userErrors ?? [];
+    const errors     = createJson.data?.fulfillmentCreate?.userErrors ?? [];
     if (errors.length) {
       const reason = errors.map((e) => `${e.field}: ${e.message}`).join("; ");
-      console.error("[fulfillment writeback] fulfillmentCreate userErrors", {
-        orderId, cnNumber, errors,
-      });
+      console.error("[fulfillment writeback] fulfillmentCreate userErrors", { orderId, cnNumber, errors });
       return { fulfilled: false, reason };
     }
 
-    await writeOrderNote(admin, orderId, cnNumber, existingNote);
-    return { fulfilled: true };
+    const createdId = createJson.data?.fulfillmentCreate?.fulfillment?.id ?? null;
+    return { fulfilled: true, fulfillmentId: createdId };
   } catch (err) {
     console.error("[fulfillment writeback] Unexpected error:", err);
     return { fulfilled: false, reason: err.message };
@@ -248,20 +219,36 @@ function parseOverrides(rawOverrides = {}) {
   };
 }
 
+// Mark a Shopify writeback as failed with exponential retry scheduling.
+async function markWritebackFailed(storeId, shopifyOrderId, currentRetryCount, status = "FULFILLMENT_FAILED") {
+  const nextCount = currentRetryCount + 1;
+  if (nextCount >= MAX_RETRIES) {
+    await db.shipment.updateMany({
+      where: { storeId, shopifyOrderId },
+      data:  { shopifySyncStatus: "FAILED_PERMANENTLY", shopifyRetryCount: nextCount, shopifyRetryAfter: null },
+    }).catch((e) => console.error("[booking] markWritebackFailed (permanent) error:", e.message));
+  } else {
+    const delayMs = RETRY_DELAYS_MS[Math.min(currentRetryCount, RETRY_DELAYS_MS.length - 1)];
+    await db.shipment.updateMany({
+      where: { storeId, shopifyOrderId },
+      data:  {
+        shopifySyncStatus: status,
+        shopifyRetryCount: nextCount,
+        shopifyRetryAfter: new Date(Date.now() + delayMs),
+      },
+    }).catch((e) => console.error("[booking] markWritebackFailed error:", e.message));
+  }
+}
+
 /**
- * Atomically acquires a booking lock on a shipment record.
- *
- * Strategy:
- *  1. Try updateMany on existing PENDING/CANCELLED record with null/expired lock.
- *  2. If 0 rows updated → check why (already booked vs locked vs missing).
- *  3. If missing → create the record with the lock held.
- *  4. Returns { acquired: true } or { acquired: false, message }
+ * Atomically acquires a booking lock.
+ * Returns { acquired: true, lockId } or { acquired: false, message }.
  */
 async function acquireBookingLock(storeId, orderId, seedData) {
   const lockExpiry = new Date(Date.now() - LOCK_TIMEOUT_MS);
-  const now = new Date();
+  const lockId     = randomUUID();
+  const now        = new Date();
 
-  // Attempt to lock an existing record
   const lockResult = await db.shipment.updateMany({
     where: {
       storeId,
@@ -269,32 +256,23 @@ async function acquireBookingLock(storeId, orderId, seedData) {
       status: { in: ["PENDING", "CANCELLED"] },
       OR: [{ bookingLockedAt: null }, { bookingLockedAt: { lt: lockExpiry } }],
     },
-    data: { bookingLockedAt: now },
+    data: { bookingLockedAt: now, bookingLockId: lockId },
   });
 
-  if (lockResult.count > 0) return { acquired: true };
+  if (lockResult.count > 0) return { acquired: true, lockId };
 
-  // Diagnose why lock was not acquired
   const existing = await db.shipment.findUnique({
     where: { storeId_shopifyOrderId: { storeId, shopifyOrderId: orderId } },
   });
 
   if (existing) {
     if (!["PENDING", "CANCELLED"].includes(existing.status)) {
-      return {
-        acquired: false,
-        message: "This order already has an active shipment.",
-      };
+      return { acquired: false, message: "This order already has an active shipment." };
     }
-    // PENDING/CANCELLED but lock is fresh → another request is in-flight
-    return {
-      acquired: false,
-      message: "Booking already in progress. Please try again in a moment.",
-    };
+    return { acquired: false, message: "Booking already in progress. Please try again in a moment." };
   }
 
-  // No record exists yet (order/create webhook may not have fired).
-  // Create with lock held — if two requests race, exactly one wins via unique constraint.
+  // No record yet — create with lock held
   try {
     await db.shipment.create({
       data: {
@@ -308,13 +286,12 @@ async function acquireBookingLock(storeId, orderId, seedData) {
         consigneePhone:   seedData.customerPhone || "",
         consigneeAddress: seedData.address || "",
         bookingLockedAt:  now,
+        bookingLockId:    lockId,
       },
     });
-    return { acquired: true };
+    return { acquired: true, lockId };
   } catch (createErr) {
     if (createErr.code === "P2002") {
-      // Unique constraint: another concurrent request just created the record.
-      // Try to lock it.
       const retryLock = await db.shipment.updateMany({
         where: {
           storeId,
@@ -322,23 +299,21 @@ async function acquireBookingLock(storeId, orderId, seedData) {
           status: { in: ["PENDING", "CANCELLED"] },
           OR: [{ bookingLockedAt: null }, { bookingLockedAt: { lt: lockExpiry } }],
         },
-        data: { bookingLockedAt: now },
+        data: { bookingLockedAt: now, bookingLockId: lockId },
       });
-      if (retryLock.count > 0) return { acquired: true };
-      return {
-        acquired: false,
-        message: "Booking already in progress. Please try again in a moment.",
-      };
+      if (retryLock.count > 0) return { acquired: true, lockId };
+      return { acquired: false, message: "Booking already in progress. Please try again in a moment." };
     }
     throw createErr;
   }
 }
 
-async function releaseLock(storeId, orderId) {
+// Only the process that owns the lockId can release it.
+async function releaseLock(storeId, orderId, lockId) {
   await db.shipment
     .updateMany({
-      where: { storeId, shopifyOrderId: orderId },
-      data: { bookingLockedAt: null },
+      where: { storeId, shopifyOrderId: orderId, bookingLockId: lockId },
+      data:  { bookingLockedAt: null, bookingLockId: null },
     })
     .catch((err) => console.error("[booking] releaseLock failed for", orderId, ":", err.message));
 }
@@ -351,26 +326,31 @@ export async function bookOrder({ admin, storeId, orderId, overrides: rawOverrid
   if (!settings.leopardApiKey || !settings.leopardApiPassword) {
     return { ok: false, message: "Save Leopards credentials before booking." };
   }
-
   if (!settings.originCityId) {
-    return {
-      ok: false,
-      message: "Origin city not set. Configure it in Settings before booking.",
-    };
+    return { ok: false, message: "Origin city not set. Configure it in Settings before booking." };
   }
 
-  const codKeywords = getCodKeywords(settings);
   const overrides = parseOverrides(rawOverrides);
-  const order = await getOrder({
-    admin,
-    storeId,
-    orderId,
-    defaultWeightGrams: settings.defaultWeightGrams,
-    codKeywords,
+
+  // Load the existing Shipment to get financialStatus/totalPrice for COD pre-fill.
+  // If the Shipment doesn't exist yet (webhook delay), fall back to what getOrder returns.
+  const existingShipment = await db.shipment.findUnique({
+    where: { storeId_shopifyOrderId: { storeId, shopifyOrderId: orderId } },
+    select: { financialStatus: true, totalPrice: true, shopifyRetryCount: true },
   });
+  const defaultCodAmount = existingShipment
+    ? codFromFinancialStatus(existingShipment.financialStatus, existingShipment.totalPrice)
+    : null;
+
+  const order = await getOrder({ admin, storeId, orderId, defaultWeightGrams: settings.defaultWeightGrams });
   if (!order) return { ok: false, message: "Shopify order was not found." };
 
-  // ── Acquire booking lock (prevents double-booking under double-click / retry) ──
+  // Override COD: merchant form input > Shipment-derived default > Shopify-derived default
+  const overridesWithCod = {
+    ...overrides,
+    codAmount: overrides.codAmount ?? defaultCodAmount ?? order.codAmount,
+  };
+
   const lock = await acquireBookingLock(storeId, orderId, {
     name:               order.name,
     defaultWeightGrams: settings.defaultWeightGrams,
@@ -384,21 +364,19 @@ export async function bookOrder({ admin, storeId, orderId, overrides: rawOverrid
   try {
     const destinationCity = await resolveCity(storeId, order.destinationCity);
 
-    // Give a specific, actionable message when the city is simply not in cache
-    // rather than the generic "Fix the order data" that provides no guidance.
     if (!destinationCity && order.destinationCity) {
-      await releaseLock(storeId, orderId);
+      await releaseLock(storeId, orderId, lock.lockId);
       return {
         ok: false,
         message: `Destination city "${order.destinationCity}" not found in city list. Go to Settings → Refresh Cities and try again.`,
       };
     }
 
-    const payload = buildPayload(order, settings, destinationCity, overrides);
+    const payload    = buildPayload(order, settings, destinationCity, overridesWithCod);
     const validation = validateBookingPayload(payload);
 
     if (!validation.ok) {
-      await releaseLock(storeId, orderId);
+      await releaseLock(storeId, orderId, lock.lockId);
       return { ok: false, message: "Fix the order data before booking.", fieldErrors: validation.errors };
     }
 
@@ -409,19 +387,16 @@ export async function bookOrder({ admin, storeId, orderId, overrides: rawOverrid
     const result = await client.bookPacket(payload);
 
     if (!result.ok) {
-      // Record the error on the shipment and release the lock
       await db.shipment.updateMany({
         where: { storeId, shopifyOrderId: orderId },
-        data: { lastError: result.message?.slice(0, 1000), bookingLockedAt: null },
+        data:  { lastError: result.message?.slice(0, 1000), bookingLockedAt: null, bookingLockId: null },
       });
-      // Strip internal fields (raw, httpStatus, leopardStatus, code) before returning
-      // to the browser — only the user-facing message and fieldErrors are needed.
       return { ok: false, message: result.message, fieldErrors: result.fieldErrors };
     }
 
     const booked = extractBookingData(result);
 
-    // ── Atomic DB commit: BOOKED state + log + lock release ──
+    // ── Atomic DB commit ───────────────────────────────────────────────────────
     const shipment = await db.$transaction(async (tx) => {
       const s = await tx.shipment.update({
         where: { storeId_shopifyOrderId: { storeId, shopifyOrderId: orderId } },
@@ -440,8 +415,11 @@ export async function bookOrder({ admin, storeId, orderId, overrides: rawOverrid
           consigneeAddress:    order.address,
           cancelledAt:         null,
           lastError:           null,
-          bookingLockedAt:     null, // release
+          bookingLockedAt:     null,
+          bookingLockId:       null,
           bookedAt:            new Date(),
+          shopifySyncStatus:   "SYNC_OK",
+          leopardSyncStatus:   "SYNC_OK",
         },
       });
       await tx.shipmentLog.create({
@@ -455,13 +433,60 @@ export async function bookOrder({ admin, storeId, orderId, overrides: rawOverrid
       return s;
     });
 
-    // ── Shopify writeback (outside DB transaction — non-fatal if it fails) ──
+    // ── Check pendingCancellation (booking + cancel race) ──────────────────────
+    // If a Shopify cancel webhook arrived while the lock was held, cancel immediately.
+    const fresh = await db.shipment.findUnique({
+      where: { id: shipment.id },
+      select: { pendingCancellation: true },
+    });
+    if (fresh?.pendingCancellation) {
+      await db.shipmentLog.create({
+        data: {
+          shipmentId: shipment.id,
+          eventType:  "PENDING_CANCELLATION_EXECUTED",
+          fromStatus: "BOOKED",
+          toStatus:   "CANCELLED",
+          message:    "Reversing booking — Shopify order was cancelled while booking was in flight.",
+        },
+      });
+      try {
+        await cancelShipments(storeId, [booked.trackNumber], admin);
+      } catch (cancelErr) {
+        console.error("[bookOrder] pendingCancellation auto-cancel failed:", cancelErr.message);
+      }
+      return { ok: false, message: `${order.name} was cancelled in Shopify — booking has been reversed.` };
+    }
+
+    // ── Shopify writeback ──────────────────────────────────────────────────────
     if (booked.trackNumber && settings.fulfillmentWritebackEnabled) {
-      const writebackResult = await writebackFulfillment(admin, order.id, booked.trackNumber, booked.slipLink, order.note);
-      if (!writebackResult.fulfilled) {
-        await db.shipment
-          .updateMany({ where: { storeId, shopifyOrderId: orderId }, data: { writebackFailed: true } })
-          .catch((err) => console.error("[booking] writebackFailed flag update failed:", err.message));
+      const wbResult = await writebackFulfillment(admin, order.id, booked.trackNumber, booked.slipLink);
+      if (wbResult.fulfilled) {
+        const updateData = { shopifySyncStatus: "SYNC_OK" };
+        if (wbResult.fulfillmentId) {
+          updateData.ourFulfillmentId = wbResult.fulfillmentId;
+        }
+        await db.shipment.updateMany({ where: { storeId, shopifyOrderId: orderId }, data: updateData })
+          .catch((e) => console.error("[bookOrder] ourFulfillmentId update failed:", e.message));
+        await db.shipmentLog.create({
+          data: {
+            shipmentId: shipment.id,
+            eventType:  "SHOPIFY_FULFILLMENT_CREATED",
+            fromStatus: "BOOKED",
+            toStatus:   "BOOKED",
+            message:    `Shopify fulfillment created (${wbResult.fulfillmentId ?? "ID unknown"})`,
+          },
+        }).catch(() => {});
+      } else {
+        await markWritebackFailed(storeId, orderId, existingShipment?.shopifyRetryCount ?? 0);
+        await db.shipmentLog.create({
+          data: {
+            shipmentId: shipment.id,
+            eventType:  "ERROR",
+            fromStatus: "BOOKED",
+            toStatus:   "BOOKED",
+            message:    `Shopify writeback failed: ${wbResult.reason ?? "unknown"}. Scheduled for retry.`,
+          },
+        }).catch(() => {});
       }
     }
 
@@ -472,12 +497,11 @@ export async function bookOrder({ admin, storeId, orderId, overrides: rawOverrid
       slipLink: booked.slipLink,
     };
   } catch (err) {
-    // Always release lock on unexpected error so the operator can retry
-    await releaseLock(storeId, orderId);
+    await releaseLock(storeId, orderId, lock.lockId);
     await db.shipment
       .updateMany({
         where: { storeId, shopifyOrderId: orderId },
-        data: { lastError: err.message?.slice(0, 500), bookingLockedAt: null },
+        data:  { lastError: err.message?.slice(0, 500), bookingLockedAt: null, bookingLockId: null },
       })
       .catch(() => {});
     throw err;
@@ -496,24 +520,19 @@ export async function bookOrdersBatch({ admin, storeId, orderIds }) {
     return { ok: false, message: "Origin city not set. Configure it in Settings." };
   }
 
-  const codKeywords = getCodKeywords(settings);
   const results = [];
 
-  // ── 1. Filter already-booked orders ─────────────────────────────────────────
+  // ── 1. Filter already-booked orders ──────────────────────────────────────────
   const existingShipments = await db.shipment.findMany({
     where: { storeId, shopifyOrderId: { in: orderIds }, status: { not: "CANCELLED" } },
-    select: { shopifyOrderId: true, shopifyOrderName: true, status: true },
+    select: { shopifyOrderId: true, shopifyOrderName: true, status: true,
+              financialStatus: true, totalPrice: true, shopifyRetryCount: true },
   });
   const alreadyActiveByOrderId = new Map(existingShipments.map((s) => [s.shopifyOrderId, s]));
 
   for (const [orderId, existing] of alreadyActiveByOrderId) {
     if (existing.status !== "PENDING") {
-      results.push({
-        orderId,
-        orderName: existing.shopifyOrderName,
-        ok:      false,
-        message: "Already booked.",
-      });
+      results.push({ orderId, orderName: existing.shopifyOrderName, ok: false, message: "Already booked." });
     }
   }
 
@@ -525,15 +544,11 @@ export async function bookOrdersBatch({ admin, storeId, orderIds }) {
     return { ok: false, message: "All selected orders are already booked.", results };
   }
 
-  // ── 2. Acquire booking locks for all eligible orders atomically ──────────────
-  const lockTs = new Date();
-  const lockExpiry = new Date(Date.now() - LOCK_TIMEOUT_MS);
+  // ── 2. Acquire batch booking locks using a shared batch UUID ─────────────────
+  const batchLockId = randomUUID();
+  const lockTs      = new Date();
+  const lockExpiry  = new Date(Date.now() - LOCK_TIMEOUT_MS);
 
-  // Determine which toFetch orders have no DB record at all.
-  // Cannot use alreadyActiveByOrderId for this — it excludes CANCELLED records,
-  // so CANCELLED orders would appear absent from that map even though they have rows.
-  // Separate from alreadyActiveByOrderId (which excludes CANCELLED) so we know
-  // exactly which orders have no DB row regardless of status.
   const existingRecordIds = new Set(
     (await db.shipment.findMany({
       where: { storeId, shopifyOrderId: { in: toFetch } },
@@ -543,26 +558,19 @@ export async function bookOrdersBatch({ admin, storeId, orderIds }) {
   const noRecordIds = toFetch.filter((id) => !existingRecordIds.has(id));
 
   if (noRecordIds.length > 0) {
-    // Seed DB records for orders the orders/create webhook hasn't processed yet.
-    // Keep the seeded fields in sync with acquireBookingLock().
-    // Any required Shipment field added there should also be added here.
-    // shopifyOrderName is a temporary placeholder — the BOOKED transaction
-    // overwrites it with the real Shopify order name (e.g. "#1732").
-    const created = await db.shipment.createMany({
+    await db.shipment.createMany({
       data: noRecordIds.map((id) => ({
         storeId,
         shopifyOrderId:   id,
-        shopifyOrderName: `#${id.split("/").pop()}`, // temporary; overwritten in BOOKED tx
+        shopifyOrderName: `#${id.split("/").pop()}`,
         weightGrams:      settings.defaultWeightGrams,
         consigneeName:    "Unknown",
         consigneePhone:   "",
         consigneeAddress: "",
         bookingLockedAt:  lockTs,
+        bookingLockId:    batchLockId,
       })),
       skipDuplicates: true,
-    });
-    console.debug(`[bulk booking] seeded ${created.count} placeholder shipment records`, {
-      attempted: noRecordIds.length,
     });
   }
 
@@ -573,25 +581,18 @@ export async function bookOrdersBatch({ admin, storeId, orderIds }) {
       status: { in: ["PENDING", "CANCELLED"] },
       OR: [{ bookingLockedAt: null }, { bookingLockedAt: { lt: lockExpiry } }],
     },
-    data: { bookingLockedAt: lockTs },
+    data: { bookingLockedAt: lockTs, bookingLockId: batchLockId },
   });
 
-  // Determine which orders we actually locked (exact timestamp match)
   const lockedRecords = await db.shipment.findMany({
-    where: { storeId, shopifyOrderId: { in: toFetch }, bookingLockedAt: lockTs },
+    where: { storeId, shopifyOrderId: { in: toFetch }, bookingLockId: batchLockId },
     select: { shopifyOrderId: true },
   });
   const lockedIds = new Set(lockedRecords.map((s) => s.shopifyOrderId));
 
-  // Orders we couldn't lock → already in-flight elsewhere
   for (const orderId of toFetch) {
     if (!lockedIds.has(orderId)) {
-      results.push({
-        orderId,
-        orderName: orderId,
-        ok:      false,
-        message: "Booking already in progress for this order.",
-      });
+      results.push({ orderId, orderName: orderId, ok: false, message: "Booking already in progress for this order." });
     }
   }
 
@@ -600,45 +601,51 @@ export async function bookOrdersBatch({ admin, storeId, orderIds }) {
     return { ok: false, message: "No bookable orders available.", results };
   }
 
-  // ── 3. Fetch Shopify orders + resolve cities in parallel ─────────────────────
-  // TODO: wrap in try/catch to release all toBatch locks on unexpected exception.
-  // Currently, an unhandled throw here holds all locks until LOCK_TIMEOUT_MS expiry.
+  // ── 3. Fetch Shopify orders + resolve cities in parallel ──────────────────────
   const fetchedOrders = await Promise.all(
     toBatch.map((orderId) =>
-      getOrder({ admin, storeId, orderId, defaultWeightGrams: settings.defaultWeightGrams, codKeywords }),
+      getOrder({ admin, storeId, orderId, defaultWeightGrams: settings.defaultWeightGrams }),
     ),
   );
 
-  // Collect all destination city names, resolve in a single DB query
   const cityNames = fetchedOrders.map((o) => o?.destinationCity ?? "").filter(Boolean);
-  const cityMap = await batchResolveCitiesInMemory(storeId, cityNames);
+  const cityMap   = await batchResolveCitiesInMemory(storeId, cityNames);
 
   const packetsToBook = [];
-  const orderContext = [];
+  const orderContext  = [];
 
   for (let i = 0; i < toBatch.length; i++) {
     const orderId = toBatch[i];
-    const order = fetchedOrders[i];
+    const order   = fetchedOrders[i];
 
     if (!order) {
-      await db.shipment
-        .updateMany({ where: { storeId, shopifyOrderId: orderId }, data: { bookingLockedAt: null } })
-        .catch(() => {});
+      await db.shipment.updateMany({
+        where: { storeId, shopifyOrderId: orderId },
+        data:  { bookingLockedAt: null, bookingLockId: null },
+      }).catch(() => {});
       results.push({ orderId, orderName: orderId, ok: false, message: "Order not found in Shopify." });
       continue;
     }
 
     const destinationCity = cityMap.get(order.destinationCity) ?? null;
-    const payload = buildPayload(order, settings, destinationCity);
+
+    // Use Shipment's financialStatus/totalPrice for COD (already synced from Shopify webhooks)
+    const shipmentRecord  = alreadyActiveByOrderId.get(orderId);
+    const codAmount       = shipmentRecord
+      ? codFromFinancialStatus(shipmentRecord.financialStatus, shipmentRecord.totalPrice)
+      : order.codAmount;
+
+    const payload    = buildPayload(order, settings, destinationCity, { codAmount });
     const validation = validateBookingPayload(payload);
 
     if (!validation.ok) {
-      await db.shipment
-        .updateMany({ where: { storeId, shopifyOrderId: orderId }, data: { bookingLockedAt: null } })
-        .catch(() => {});
+      await db.shipment.updateMany({
+        where: { storeId, shopifyOrderId: orderId },
+        data:  { bookingLockedAt: null, bookingLockId: null },
+      }).catch(() => {});
       results.push({
         orderId,
-        orderName: order.name,
+        orderName:   order.name,
         ok:          false,
         message:     "Invalid order data: " + Object.keys(validation.errors).join(", "),
         fieldErrors: validation.errors,
@@ -647,69 +654,58 @@ export async function bookOrdersBatch({ admin, storeId, orderIds }) {
     }
 
     packetsToBook.push(payload);
-    orderContext.push({ order, destinationCity, orderId });
+    orderContext.push({ order, destinationCity, orderId, shipmentRecord });
   }
 
   if (!packetsToBook.length) {
     return { ok: false, message: "No valid orders to book.", results };
   }
 
-  // ── 4. Call Leopards API in chunks of 100 (batchBookPacketv2 limit) ──────────
+  // ── 4. Call Leopards API in chunks of 100 ────────────────────────────────────
   const BATCH_SIZE = 100;
   const client = new LeopardApiClient({ storeId, settings });
   const writebackTasks = [];
 
   for (let ci = 0; ci < packetsToBook.length; ci += BATCH_SIZE) {
-    const chunkPackets = packetsToBook.slice(ci, ci + BATCH_SIZE);
-    const chunkContext = orderContext.slice(ci, ci + BATCH_SIZE);
-
-    const apiResult = await client.batchBookPacket(chunkPackets);
-    const dataArr   = Array.isArray(apiResult.data)
+    const chunkPackets  = packetsToBook.slice(ci, ci + BATCH_SIZE);
+    const chunkContext  = orderContext.slice(ci, ci + BATCH_SIZE);
+    const apiResult     = await client.batchBookPacket(chunkPackets);
+    const dataArr       = Array.isArray(apiResult.data)
       ? apiResult.data
       : Array.isArray(apiResult.raw?.data)
         ? apiResult.raw.data
         : [];
 
-    // Total failure for this chunk — mark all orders in it as failed and try next chunk
     if (!apiResult.ok && !dataArr.length) {
       for (const { order, orderId } of chunkContext) {
-        await db.shipment
-          .updateMany({
-            where: { storeId, shopifyOrderId: orderId },
-            data: { lastError: apiResult.message?.slice(0, 1000), bookingLockedAt: null },
-          })
-          .catch(() => {});
+        await db.shipment.updateMany({
+          where: { storeId, shopifyOrderId: orderId },
+          data:  { lastError: apiResult.message?.slice(0, 1000), bookingLockedAt: null, bookingLockId: null },
+        }).catch(() => {});
         results.push({ orderId, orderName: order.name, ok: false, message: apiResult.message ?? "Batch booking failed." });
       }
       continue;
     }
 
-    // Correlate by booked_packet_order_id (never by position)
     const byOrderName = new Map();
     for (const item of dataArr) {
       const key = item?.booked_packet_order_id ? String(item.booked_packet_order_id) : null;
       if (key) byOrderName.set(key, item);
     }
 
-    // Persist each result in the chunk
     for (let i = 0; i < chunkContext.length; i++) {
-      const { order, destinationCity, orderId } = chunkContext[i];
+      const { order, destinationCity, orderId, shipmentRecord } = chunkContext[i];
       const item        = byOrderName.get(order.name) ?? (byOrderName.size === 0 ? dataArr[i] : undefined);
       const trackNumber = item?.track_number;
       const slipLink    = item?.slip_link;
 
       if (!trackNumber) {
-        const rawError =
-          item?.error ??
-          apiResult.raw?.error?.[`bookPacket - ${i}`] ??
-          "Leopards rejected this packet.";
-        const errMsg = typeof rawError === "string" ? rawError : JSON.stringify(rawError);
-        await db.shipment
-          .updateMany({
-            where: { storeId, shopifyOrderId: orderId },
-            data: { lastError: errMsg.slice(0, 1000), bookingLockedAt: null },
-          })
-          .catch(() => {});
+        const rawError  = item?.error ?? apiResult.raw?.error?.[`bookPacket - ${i}`] ?? "Leopards rejected this packet.";
+        const errMsg    = typeof rawError === "string" ? rawError : JSON.stringify(rawError);
+        await db.shipment.updateMany({
+          where: { storeId, shopifyOrderId: orderId },
+          data:  { lastError: errMsg.slice(0, 1000), bookingLockedAt: null, bookingLockId: null },
+        }).catch(() => {});
         results.push({ orderId, orderName: order.name, ok: false, message: errMsg });
         continue;
       }
@@ -734,7 +730,10 @@ export async function bookOrdersBatch({ admin, storeId, orderIds }) {
               cancelledAt:         null,
               lastError:           null,
               bookingLockedAt:     null,
+              bookingLockId:       null,
               bookedAt:            new Date(),
+              shopifySyncStatus:   "SYNC_OK",
+              leopardSyncStatus:   "SYNC_OK",
             },
           });
           await tx.shipmentLog.create({
@@ -748,14 +747,42 @@ export async function bookOrdersBatch({ admin, storeId, orderIds }) {
           return s;
         });
 
+        // Check pendingCancellation after commit
+        const fresh = await db.shipment.findUnique({
+          where: { id: shipment.id },
+          select: { pendingCancellation: true },
+        });
+        if (fresh?.pendingCancellation) {
+          await db.shipmentLog.create({
+            data: {
+              shipmentId: shipment.id,
+              eventType:  "PENDING_CANCELLATION_EXECUTED",
+              fromStatus: "BOOKED",
+              toStatus:   "CANCELLED",
+              message:    "Reversing batch booking — Shopify order was cancelled while booking was in flight.",
+            },
+          }).catch(() => {});
+          cancelShipments(storeId, [trackNumber], admin).catch((e) =>
+            console.error("[bookOrdersBatch] pendingCancellation auto-cancel failed:", e.message),
+          );
+          results.push({ orderId, orderName: order.name, ok: false, message: "Cancelled in Shopify while booking was in flight — reversed." });
+          continue;
+        }
+
         if (trackNumber && settings.fulfillmentWritebackEnabled) {
-          const taskOrderId = orderId;
+          const capturedOrderId = orderId;
+          const retryCount      = shipmentRecord?.shopifyRetryCount ?? 0;
           writebackTasks.push(async () => {
-            const result = await writebackFulfillment(admin, order.id, trackNumber, slipLink, order.note);
-            if (!result.fulfilled) {
-              await db.shipment
-                .updateMany({ where: { storeId, shopifyOrderId: taskOrderId }, data: { writebackFailed: true } })
-                .catch((err) => console.error("[batch writeback] writebackFailed flag update failed:", err.message));
+            const wbResult = await writebackFulfillment(admin, order.id, trackNumber, slipLink);
+            if (wbResult.fulfilled) {
+              const updateData = { shopifySyncStatus: "SYNC_OK" };
+              if (wbResult.fulfillmentId) {
+                updateData.ourFulfillmentId  = wbResult.fulfillmentId;
+                    }
+              await db.shipment.updateMany({ where: { storeId, shopifyOrderId: capturedOrderId }, data: updateData })
+                .catch((e) => console.error("[batch writeback] ourFulfillmentId update failed:", e.message));
+            } else {
+              await markWritebackFailed(storeId, capturedOrderId, retryCount);
             }
           });
         }
@@ -763,13 +790,15 @@ export async function bookOrdersBatch({ admin, storeId, orderIds }) {
         results.push({ orderId, orderName: order.name, cnNumber: trackNumber, ok: true, message: `Booked with CN ${trackNumber}` });
       } catch (dbErr) {
         console.error(`[bookOrdersBatch] DB commit failed for ${order.name}:`, dbErr);
-        await releaseLock(storeId, orderId);
+        await db.shipment.updateMany({
+          where: { storeId, shopifyOrderId: orderId },
+          data:  { bookingLockedAt: null, bookingLockId: null },
+        }).catch(() => {});
         results.push({ orderId, orderName: order.name, ok: false, message: "Failed to save booking. The CN may have been created — check with Leopards." });
       }
     }
   }
 
-  // ── 7. Parallel Shopify writeback (non-fatal) ─────────────────────────────────
   if (writebackTasks.length) {
     await Promise.allSettled(writebackTasks.map((fn) => fn()));
   }
@@ -786,28 +815,60 @@ export async function bookOrdersBatch({ admin, storeId, orderIds }) {
   };
 }
 
-export async function retryWriteback({ admin, storeId, orderId }) {
-  // Guard 1: DB flag — cheap early exit if another process already cleared it
+// Restores a Shopify fulfillment that was removed externally while our CN is still active.
+export async function restoreBrokenFulfillment({ admin, storeId, orderId }) {
   const shipment = await db.shipment.findUnique({
     where: { storeId_shopifyOrderId: { storeId, shopifyOrderId: orderId } },
-    select: { cnNumber: true, slipLink: true, writebackFailed: true },
+    select: { id: true, cnNumber: true, slipLink: true },
+  });
+  if (!shipment?.cnNumber) {
+    return { ok: false, message: "No CN number found for this order." };
+  }
+
+  const result = await writebackFulfillment(admin, orderId, shipment.cnNumber, shipment.slipLink);
+
+  if (result.fulfilled) {
+    const updateData = {
+      shopifySyncBroken: false,
+      shopifySyncStatus: "SYNC_OK",
+      shopifyRetryCount: 0,
+      shopifyRetryAfter: null,
+    };
+    if (result.fulfillmentId) updateData.ourFulfillmentId = result.fulfillmentId;
+    await db.shipment.updateMany({ where: { storeId, shopifyOrderId: orderId }, data: updateData })
+      .catch((e) => console.error("[restoreBrokenFulfillment] update error:", e.message));
+    await db.shipmentLog.create({
+      data: {
+        shipmentId: shipment.id,
+        eventType:  "SYNC_FIXED",
+        fromStatus: "BOOKED",
+        toStatus:   "BOOKED",
+        message:    "Shopify fulfillment restored by merchant action.",
+      },
+    }).catch(() => {});
+    return { ok: true, message: "Shopify fulfillment restored successfully." };
+  }
+
+  return { ok: false, message: result.reason ?? "Failed to restore Shopify fulfillment." };
+}
+
+export async function retryWriteback({ admin, storeId, orderId }) {
+  const shipment = await db.shipment.findUnique({
+    where: { storeId_shopifyOrderId: { storeId, shopifyOrderId: orderId } },
+    select: { cnNumber: true, slipLink: true, shopifySyncStatus: true, shopifyRetryCount: true, id: true },
   });
 
   if (!shipment?.cnNumber) {
     return { ok: false, message: "No CN number found for this order." };
   }
-  if (!shipment.writebackFailed) {
+  if (shipment.shopifySyncStatus === "SYNC_OK") {
     return { ok: true, message: "Sync already succeeded — nothing to retry." };
   }
 
-  // Guard 2: Shopify state — explicit check for existing fulfillment so the
-  // retry is idempotent even when the DB flag is stale (race condition where
-  // Shopify already created the fulfillment but the webhook hasn't cleared the flag yet).
   const foResponse = await admin.graphql(
     `#graphql
       query CheckFulfillmentState($id: ID!) {
         order(id: $id) {
-          note
           fulfillmentOrders(first: 5) {
             nodes { id status supportedActions { action } }
           }
@@ -817,38 +878,58 @@ export async function retryWriteback({ admin, storeId, orderId }) {
     { variables: { id: orderId } },
   );
   const foJson            = await foResponse.json();
-  const existingNote      = foJson.data?.order?.note ?? "";
   const fulfillmentOrders = foJson.data?.order?.fulfillmentOrders?.nodes ?? [];
+  const alreadyFulfilled  =
+    fulfillmentOrders.length > 0 && fulfillmentOrders.every((fo) => fo.status === "CLOSED");
+
+  if (alreadyFulfilled) {
+    await db.shipment.updateMany({
+      where: { storeId, shopifyOrderId: orderId },
+      data:  { shopifySyncStatus: "SYNC_OK", shopifyRetryCount: 0, shopifyRetryAfter: null },
+    }).catch((e) => console.error("[retryWriteback] flag clear failed:", e.message));
+    return { ok: true, message: "Shopify fulfillment already exists — sync flag cleared." };
+  }
 
   const hasOpenFo = fulfillmentOrders.some((fo) =>
     fo.supportedActions?.some((a) => a.action === "CREATE_FULFILLMENT"),
   );
-  const alreadyFulfilled =
-    fulfillmentOrders.length > 0 && fulfillmentOrders.every((fo) => fo.status === "CLOSED");
-
-  if (alreadyFulfilled) {
-    // Shopify already has a fulfillment — clear our stale flag and return success
-    await db.shipment
-      .updateMany({ where: { storeId, shopifyOrderId: orderId }, data: { writebackFailed: false } })
-      .catch((err) => console.error("[retryWriteback] flag clear failed:", err.message));
-    return { ok: true, message: "Shopify fulfillment already exists — sync flag cleared." };
-  }
-
   if (!hasOpenFo) {
     return { ok: false, message: "No open fulfillment order found in Shopify for this order." };
   }
 
-  const result = await writebackFulfillment(
-    admin, orderId, shipment.cnNumber, shipment.slipLink, existingNote,
-  );
+  await db.shipmentLog.create({
+    data: {
+      shipmentId: shipment.id,
+      eventType:  "SYNC_RETRY",
+      fromStatus: "BOOKED",
+      toStatus:   "BOOKED",
+      message:    `Manual retry of Shopify writeback (attempt ${shipment.shopifyRetryCount + 1})`,
+    },
+  }).catch(() => {});
+
+  const result = await writebackFulfillment(admin, orderId, shipment.cnNumber, shipment.slipLink);
 
   if (result.fulfilled) {
-    await db.shipment
-      .updateMany({ where: { storeId, shopifyOrderId: orderId }, data: { writebackFailed: false } })
-      .catch((err) => console.error("[retryWriteback] flag clear failed:", err.message));
+    const updateData = { shopifySyncStatus: "SYNC_OK", shopifyRetryCount: 0, shopifyRetryAfter: null };
+    if (result.fulfillmentId) {
+      updateData.ourFulfillmentId  = result.fulfillmentId;
+      updateData.fulfillmentSource = "OUR_APP";
+    }
+    await db.shipment.updateMany({ where: { storeId, shopifyOrderId: orderId }, data: updateData })
+      .catch((e) => console.error("[retryWriteback] flag clear failed:", e.message));
+    await db.shipmentLog.create({
+      data: {
+        shipmentId: shipment.id,
+        eventType:  "SYNC_FIXED",
+        fromStatus: "BOOKED",
+        toStatus:   "BOOKED",
+        message:    "Shopify writeback retry succeeded.",
+      },
+    }).catch(() => {});
     return { ok: true, message: "Shopify sync succeeded." };
   }
 
+  await markWritebackFailed(storeId, orderId, shipment.shopifyRetryCount, "FULFILLMENT_FAILED");
   return {
     ok:      false,
     message: result.reason

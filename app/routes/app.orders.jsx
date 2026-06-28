@@ -4,8 +4,8 @@ import { useAppBridge } from "@shopify/app-bridge-react";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
 import { ensureStore } from "../services/store.server";
-import { getSettings, getCodKeywords } from "../services/settings.server";
-import { listOrders } from "../services/shopify-orders.server";
+import { getSettings } from "../services/settings.server";
+import db from "../db.server";
 import { bookOrder, bookOrdersBatch, retryWriteback } from "../services/booking.server";
 
 // ── Design tokens (match globals.css) ────────────────────────────────────────
@@ -163,7 +163,7 @@ function BookingModal({ order, fetcher, defaultWeightGrams, defaultSpecialInstru
             </div>
             <div className="lb-modal-subtitle">
               {order.customerName}
-              {order.destinationCity ? ` · ${order.destinationCity}` : ""}
+              {order.address ? ` · ${order.address}` : ""}
               {order.codAmount > 0 ? ` · COD ${order.codAmount.toLocaleString()} ${order.currency}` : " · Prepaid"}
             </div>
           </div>
@@ -227,28 +227,69 @@ function BookingModal({ order, fetcher, defaultWeightGrams, defaultSpecialInstru
 
 // ── Loader / Action ───────────────────────────────────────────────────────────
 
+const PER_PAGE = 50;
+
 export const loader = async ({ request }) => {
-  const { admin, session } = await authenticate.admin(request);
+  const { session } = await authenticate.admin(request);
   const store    = await ensureStore(session);
   const settings = await getSettings(store.id);
   const url      = new URL(request.url);
-  const codKeywords = getCodKeywords(settings);
+  const query    = (url.searchParams.get("query") ?? "").trim();
+  const page     = Math.max(1, parseInt(url.searchParams.get("page") ?? "1", 10) || 1);
 
-  const { orders, pageInfo } = await listOrders({
-    admin,
-    storeId:            store.id,
-    query:              url.searchParams.get("query") ?? "",
-    first:              50,
-    after:              url.searchParams.get("after") ?? null,
-    before:             url.searchParams.get("before") ?? null,
-    defaultWeightGrams: settings.defaultWeightGrams,
-    codKeywords,
-  });
+  const where = {
+    storeId:         store.id,
+    status:          "PENDING",
+    shopifyDeletedAt: null,
+    ...(query
+      ? {
+          OR: [
+            { shopifyOrderName: { contains: query, mode: "insensitive" } },
+            { consigneeName:    { contains: query, mode: "insensitive" } },
+            { consigneePhone:   { contains: query, mode: "insensitive" } },
+          ],
+        }
+      : {}),
+  };
+
+  const [shipments, total] = await Promise.all([
+    db.shipment.findMany({
+      where,
+      orderBy: { shopifyCreatedAt: "desc" },
+      skip:    (page - 1) * PER_PAGE,
+      take:    PER_PAGE,
+    }),
+    db.shipment.count({ where }),
+  ]);
+
+  const pageCount = Math.max(1, Math.ceil(total / PER_PAGE));
 
   return {
-    orders,
-    query:                      url.searchParams.get("query") ?? "",
-    pageInfo,
+    orders: shipments.map((s) => ({
+      id:                       s.shopifyOrderId,
+      shipmentId:               s.id,
+      name:                     s.shopifyOrderName,
+      customerName:             s.consigneeName,
+      customerPhone:            s.consigneePhone,
+      address:                  s.consigneeAddress,
+      financialStatus:          s.financialStatus,
+      codAmount:                s.codAmount,
+      currency:                 "PKR",
+      note:                     s.note ?? "",
+      weightGrams:              s.weightGrams,
+      bookingStatus:            s.status,
+      cnNumber:                 s.cnNumber ?? "",
+      slipLink:                 s.slipLink ?? "",
+      lastError:                s.lastError ?? "",
+      shopifySyncStatus:        s.shopifySyncStatus,
+      bookingLockedAt:          s.bookingLockedAt,
+      externalFulfillmentSource: s.externalFulfillmentSource,
+      externalTrackingNumber:   s.externalTrackingNumber,
+    })),
+    query,
+    page,
+    pageCount,
+    total,
     hasCredentials:             settings.hasCredentials,
     hasOriginCity:              Boolean(settings.originCityId),
     defaultWeightGrams:         settings.defaultWeightGrams,
@@ -274,6 +315,35 @@ export const action = async ({ request }) => {
     return retryWriteback({ admin, storeId: store.id, orderId: formData.get("orderId") });
   }
 
+  // "Book Anyway" — merchant confirmed booking over an existing external fulfillment.
+  // Log audit event first, then proceed with normal booking.
+  if (intent === "bookAnyway") {
+    const orderId    = formData.get("orderId");
+    const shipmentId = formData.get("shipmentId");
+    if (shipmentId) {
+      await db.shipmentLog.create({
+        data: {
+          shipmentId,
+          eventType:  "MANUAL_BOOK_ANYWAY",
+          fromStatus: "PENDING",
+          toStatus:   "PENDING",
+          message:    "Merchant confirmed booking despite existing external fulfillment.",
+        },
+      }).catch(() => {});
+    }
+    return bookOrder({
+      admin,
+      storeId: store.id,
+      orderId,
+      overrides: {
+        weightGrams:         formData.get("overrideWeight"),
+        noOfPieces:          formData.get("overridePieces"),
+        codAmount:           formData.get("overrideCod"),
+        specialInstructions: formData.get("overrideInstructions"),
+      },
+    });
+  }
+
   return bookOrder({
     admin,
     storeId: store.id,
@@ -289,25 +359,42 @@ export const action = async ({ request }) => {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-function canBookOrder(order, hasCredentials) {
-  if (!hasCredentials) return false;
-  if (order.cnNumber && order.bookingStatus !== "CANCELLED") return false;
-  return order.bookingStatus === "PENDING" || order.bookingStatus === "CANCELLED";
+const LOCK_TIMEOUT_MS = 5 * 60 * 1000;
+
+function isBookingLocked(order) {
+  if (!order.bookingLockedAt) return false;
+  return (Date.now() - new Date(order.bookingLockedAt).getTime()) < LOCK_TIMEOUT_MS;
 }
 
-function buildPageQuery({ query, after, before }) {
+function canBookOrder(order, hasCredentials) {
+  if (!hasCredentials) return false;
+  if (isBookingLocked(order)) return false;
+  return order.bookingStatus === "PENDING";
+}
+
+function hasExternalFulfillment(order) {
+  return Boolean(order.externalFulfillmentSource);
+}
+
+function buildPageQuery({ query, page }) {
   const p = new URLSearchParams();
   if (query) p.set("query", query);
-  if (after)  p.set("after",  after);
-  if (before) p.set("before", before);
+  if (page && page !== 1) p.set("page", String(page));
   return p.toString();
 }
+
+const EXTERNAL_SOURCE_LABELS = {
+  SHOPIFY_ADMIN: "Shopify Admin",
+  THIRD_PARTY:   "Third-party app",
+  OUR_APP:       "Our app",
+  UNKNOWN:       "Unknown source",
+};
 
 // ── Page ──────────────────────────────────────────────────────────────────────
 
 export default function Orders() {
   const {
-    orders, query, pageInfo,
+    orders, query, page, pageCount, total,
     hasCredentials, hasOriginCity,
     defaultWeightGrams, defaultSpecialInstructions,
   } = useLoaderData();
@@ -319,10 +406,12 @@ export default function Orders() {
 
   const SELECTION_CAP = 100;
 
-  const [selectedIds,       setSelectedIds]       = useState(() => new Set());
-  const [bookingModalOrder, setBookingModalOrder]  = useState(null);
-  const [fieldErrors,       setFieldErrors]        = useState(null);
-  const [batchResults,      setBatchResults]       = useState(null);
+  const [selectedIds,         setSelectedIds]         = useState(() => new Set());
+  const [bookingModalOrder,   setBookingModalOrder]    = useState(null);
+  // Order pending "Book Anyway" confirmation (has external fulfillment)
+  const [bookAnywayOrder,     setBookAnywayOrder]      = useState(null);
+  const [fieldErrors,         setFieldErrors]          = useState(null);
+  const [batchResults,        setBatchResults]         = useState(null);
   const prevFetcherData = useRef(null);
 
   const loading            = navigation.state === "loading";
@@ -346,10 +435,11 @@ export default function Orders() {
     }
     if (fetcher.data.ok) {
       setBookingModalOrder(null);
+      setBookAnywayOrder(null);
       if (fetcher.formData?.get("intent") === "bookBatch") {
         setSelectedIds(new Set());
-        revalidator.revalidate();
       }
+      revalidator.revalidate();
     }
   }, [fetcher.data, fetcher.formData, shopify]);
 
@@ -365,14 +455,15 @@ export default function Orders() {
     });
   }
 
-  const bookableOrders     = orders.filter((o) => canBookOrder(o, hasCredentials));
+  // Only non-externally-fulfilled orders are batch-bookable (no Book Anyway in batch)
+  const bookableOrders     = orders.filter((o) => canBookOrder(o, hasCredentials) && !hasExternalFulfillment(o));
   const selectableOrders   = bookableOrders.slice(0, SELECTION_CAP);
   const allVisibleSelected = selectableOrders.length > 0 && selectableOrders.every((o) => selectedIds.has(o.id));
 
   return (
     <s-page heading="Orders">
 
-      {/* ── Booking Modal (fixed overlay, not bottom of page) ── */}
+      {/* ── Booking Modal ── */}
       {bookingModalOrder && (
         <BookingModal
           order={bookingModalOrder}
@@ -383,6 +474,53 @@ export default function Orders() {
           disabled={anyBookingInFlight}
           onClose={() => setBookingModalOrder(null)}
         />
+      )}
+
+      {/* ── Book Anyway confirmation modal ── */}
+      {bookAnywayOrder && (
+        <div
+          className="lb-modal-backdrop"
+          onClick={(e) => { if (e.target === e.currentTarget) setBookAnywayOrder(null); }}
+          role="dialog"
+          aria-modal="true"
+        >
+          <div className="lb-modal" style={{ maxWidth: 480 }}>
+            <div className="lb-modal-header">
+              <div className="lb-modal-title">⚠ External fulfillment detected</div>
+              <button onClick={() => setBookAnywayOrder(null)} className="lb-modal-close" aria-label="Close">×</button>
+            </div>
+            <div className="lb-modal-body">
+              <p style={{ fontSize: 13, color: "#444750", lineHeight: 1.6, margin: 0 }}>
+                Order <strong>{bookAnywayOrder.name}</strong> was already fulfilled via{" "}
+                <strong>{EXTERNAL_SOURCE_LABELS[bookAnywayOrder.externalFulfillmentSource] ?? bookAnywayOrder.externalFulfillmentSource}</strong>
+                {bookAnywayOrder.externalTrackingNumber
+                  ? ` (tracking: ${bookAnywayOrder.externalTrackingNumber})`
+                  : ""
+                }.
+              </p>
+              <p style={{ fontSize: 13, color: "#b7831a", fontWeight: 600, marginTop: 12, marginBottom: 0 }}>
+                Proceeding will create a second Shopify fulfillment and a separate Leopards shipment.
+                Only continue if you intend to ship this order through Leopards as well.
+              </p>
+            </div>
+            <div className="lb-modal-footer">
+              <s-button onClick={() => setBookAnywayOrder(null)} disabled={anyBookingInFlight}>Cancel</s-button>
+              <s-button
+                variant="primary"
+                disabled={anyBookingInFlight || !hasCredentials}
+                loading={anyBookingInFlight}
+                onClick={() => {
+                  fetcher.submit(
+                    { intent: "bookAnyway", orderId: bookAnywayOrder.id, shipmentId: bookAnywayOrder.shipmentId },
+                    { method: "post", action: "/app/orders" },
+                  );
+                }}
+              >
+                Book Anyway
+              </s-button>
+            </div>
+          </div>
+        </div>
       )}
 
       {/* ── Setup warnings ── */}
@@ -545,7 +683,7 @@ export default function Orders() {
               </s-table-header>
               <s-table-header>Order</s-table-header>
               <s-table-header>Customer</s-table-header>
-              <s-table-header>City</s-table-header>
+              <s-table-header>Address</s-table-header>
               <s-table-header>Payment</s-table-header>
               <s-table-header>COD</s-table-header>
               <s-table-header>Status</s-table-header>
@@ -555,7 +693,7 @@ export default function Orders() {
               {orders.map((order) => {
                 const isBookable  = canBookOrder(order, hasCredentials);
                 const isBooked    = Boolean(order.cnNumber) && order.bookingStatus !== "CANCELLED";
-                const hasFailed   = Boolean(order.lastError) && order.bookingStatus === "PENDING";
+                const hasFailed   = Boolean(order.lastError) && order.bookingStatus === "PENDING" && !order.externalFulfillmentSource;
                 const thisRowBusy = anyBookingInFlight && fetcher.formData?.get("orderId") === order.id;
 
                 return (
@@ -580,7 +718,9 @@ export default function Orders() {
                     </s-table-cell>
 
                     <s-table-cell>
-                      <span style={{ fontSize: 13, color: "#444750" }}>{order.destinationCity || "—"}</span>
+                      <span style={{ fontSize: 12, color: "#444750", maxWidth: 160, display: "block", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={order.address}>
+                        {order.address || "—"}
+                      </span>
                     </s-table-cell>
 
                     <s-table-cell>
@@ -614,32 +754,54 @@ export default function Orders() {
                             <span className="lb-mono" style={{ fontSize: 12, color: "#444750" }}>{order.cnNumber}</span>
                           )}
                           <span style={{ fontSize: 11, color: "#8c9196" }}>CN number</span>
-                          {order.writebackFailed && (
+                          {order.shopifySyncStatus && order.shopifySyncStatus !== "SYNC_OK" && (
                             <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 2 }}>
-                              <span style={{ fontSize: 11, color: "#b7831a", fontWeight: 600 }}>⚠ Sync failed</span>
-                              <s-button
-                                size="slim"
-                                loading={
-                                  fetcher.state !== "idle" &&
-                                  fetcher.formData?.get("intent") === "retrySync" &&
-                                  fetcher.formData?.get("orderId") === order.id
-                                }
-                                disabled={anyBookingInFlight}
-                                onClick={() =>
-                                  fetcher.submit(
-                                    { intent: "retrySync", orderId: order.id },
-                                    { method: "post", action: "/app/orders" },
-                                  )
-                                }
-                              >
-                                Retry
-                              </s-button>
+                              <span style={{ fontSize: 11, color: "#b7831a", fontWeight: 600 }}>
+                                {order.shopifySyncStatus === "FAILED_PERMANENTLY" ? "⛔ Sync failed permanently" : "⚠ Sync failed"}
+                              </span>
+                              {order.shopifySyncStatus !== "FAILED_PERMANENTLY" && (
+                                <s-button
+                                  size="slim"
+                                  loading={
+                                    fetcher.state !== "idle" &&
+                                    fetcher.formData?.get("intent") === "retrySync" &&
+                                    fetcher.formData?.get("orderId") === order.id
+                                  }
+                                  disabled={anyBookingInFlight}
+                                  onClick={() =>
+                                    fetcher.submit(
+                                      { intent: "retrySync", orderId: order.id },
+                                      { method: "post", action: "/app/orders" },
+                                    )
+                                  }
+                                >
+                                  Retry
+                                </s-button>
+                              )}
                             </div>
                           )}
                         </div>
+                      ) : isBookingLocked(order) ? (
+                        <span style={{ fontSize: 12, color: "#8c9196", fontStyle: "italic" }}>Booking in progress…</span>
+                      ) : hasExternalFulfillment(order) ? (
+                        <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                          <div style={{ fontSize: 11, color: "#b7831a", fontWeight: 600 }}>
+                            ⚠ Fulfilled via {EXTERNAL_SOURCE_LABELS[order.externalFulfillmentSource] ?? order.externalFulfillmentSource}
+                          </div>
+                          <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                            <s-button
+                              variant="primary"
+                              size="slim"
+                              disabled={anyBookingInFlight || !hasCredentials}
+                              onClick={() => setBookAnywayOrder(order)}
+                            >
+                              Book Anyway
+                            </s-button>
+                          </div>
+                          {hasFailed && <ErrorDetail error={order.lastError} />}
+                        </div>
                       ) : (
                         <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
-                          {/* Primary book action */}
                           <s-button
                             variant="primary"
                             size="slim"
@@ -654,8 +816,6 @@ export default function Orders() {
                           >
                             {hasFailed ? "Retry" : "Book"}
                           </s-button>
-
-                          {/* Options button → opens modal */}
                           {isBookable && !anyBookingInFlight && (
                             <button
                               onClick={() => setBookingModalOrder(bookingModalOrder?.id === order.id ? null : order)}
@@ -678,18 +838,21 @@ export default function Orders() {
       </s-section>
 
       {/* ── Pagination ── */}
-      {orders.length > 0 && (pageInfo.hasNextPage || pageInfo.hasPreviousPage) && (
+      {pageCount > 1 && (
         <s-section>
-          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
             <s-button
-              href={pageInfo.hasPreviousPage ? `/app/orders?${buildPageQuery({ query, before: pageInfo.startCursor })}` : undefined}
-              disabled={!pageInfo.hasPreviousPage}
+              href={page > 1 ? `/app/orders?${buildPageQuery({ query, page: page - 1 })}` : undefined}
+              disabled={page <= 1}
             >
               ← Previous
             </s-button>
+            <span style={{ fontSize: 13, color: "#6d7175" }}>
+              Page {page} of {pageCount} ({total} orders)
+            </span>
             <s-button
-              href={pageInfo.hasNextPage ? `/app/orders?${buildPageQuery({ query, after: pageInfo.endCursor })}` : undefined}
-              disabled={!pageInfo.hasNextPage}
+              href={page < pageCount ? `/app/orders?${buildPageQuery({ query, page: page + 1 })}` : undefined}
+              disabled={page >= pageCount}
             >
               Next →
             </s-button>

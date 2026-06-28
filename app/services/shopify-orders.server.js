@@ -1,8 +1,5 @@
 import db from "../db.server";
-// ── Single Source of Truth for COD detection ──────────────────────────────────
-// isCodOrder / calculateCodAmount live in cod.server.js; import them here so
-// both the order-listing path and the webhook path always use identical logic.
-import { isCodOrder } from "../lib/cod.server";
+import { codFromFinancialStatus } from "../lib/cod.server";
 
 // ── GraphQL fragments ─────────────────────────────────────────────────────────
 
@@ -64,24 +61,20 @@ const ORDER_BY_ID_QUERY = `#graphql
   }
 `;
 
-const DEFAULT_COD_KEYWORDS = ["cod", "cash on delivery"];
-
 // ── Order shaping ─────────────────────────────────────────────────────────────
 
-export function shapeOrder(order, shipment = null, defaultWeightGrams = 1000, codKeywords = DEFAULT_COD_KEYWORDS) {
+export function shapeOrder(order, shipment = null, defaultWeightGrams = 1000) {
   const shipping = order.shippingAddress ?? {};
 
-  // currentTotalPriceSet reflects post-booking edits and partial refunds.
-  // It equals: product subtotal + shipping charges + taxes − all discounts.
-  // Falls back to totalPriceSet (original order total) when not available.
-  const currentTotal = order.currentTotalPriceSet?.shopMoney;
-  const originalTotal = order.totalPriceSet?.shopMoney;
+  const currentTotal   = order.currentTotalPriceSet?.shopMoney;
+  const originalTotal  = order.totalPriceSet?.shopMoney;
   const effectiveTotal = currentTotal ?? originalTotal;
+  const rawAmount      = parseFloat(effectiveTotal?.amount ?? "0");
+  const safeAmount     = Math.round(Number.isFinite(rawAmount) ? rawAmount : 0);
 
-  const rawAmount = parseFloat(effectiveTotal?.amount ?? "0");
-  const codAmount = isCodOrder(order.paymentGatewayNames, codKeywords)
-    ? Math.round(Number.isFinite(rawAmount) ? rawAmount : 0)
-    : 0;
+  // COD rule: PAID → 0, everything else → order total
+  const financialStatus = order.displayFinancialStatus ?? "PENDING";
+  const codAmount       = codFromFinancialStatus(financialStatus, safeAmount);
 
   const isCancelledShipment = shipment?.status === "CANCELLED";
 
@@ -95,16 +88,16 @@ export function shapeOrder(order, shipment = null, defaultWeightGrams = 1000, co
     address: [shipping.address1, shipping.address2, shipping.city, shipping.province, shipping.zip]
       .filter(Boolean)
       .join(", "),
-    financialStatus: order.displayFinancialStatus,
+    financialStatus,
     codAmount,
-    currency:      effectiveTotal?.currencyCode ?? "PKR",
-    weightGrams:   defaultWeightGrams,
-    note:          order.note ?? "",
-    bookingStatus:  isCancelledShipment ? "PENDING" : shipment?.status ?? "PENDING",
-    cnNumber:       isCancelledShipment ? "" : shipment?.cnNumber ?? "",
-    slipLink:       isCancelledShipment ? "" : shipment?.slipLink ?? "",
-    lastError:      shipment?.lastError ?? "",
-    writebackFailed: !isCancelledShipment && Boolean(shipment?.writebackFailed),
+    currency:         effectiveTotal?.currencyCode ?? "PKR",
+    weightGrams:      defaultWeightGrams,
+    note:             order.note ?? "",
+    bookingStatus:    isCancelledShipment ? "PENDING" : shipment?.status ?? "PENDING",
+    cnNumber:         isCancelledShipment ? "" : shipment?.cnNumber ?? "",
+    slipLink:         isCancelledShipment ? "" : shipment?.slipLink ?? "",
+    lastError:        shipment?.lastError ?? "",
+    shopifySyncStatus: !isCancelledShipment ? (shipment?.shopifySyncStatus ?? "SYNC_OK") : "SYNC_OK",
   };
 }
 
@@ -118,7 +111,6 @@ export async function listOrders({
   after = null,
   before = null,
   defaultWeightGrams = 1000,
-  codKeywords = DEFAULT_COD_KEYWORDS,
 }) {
   // Shopify cursor pagination: use `last + before` for backward, `first + after` for forward.
   const variables = { query: query || null };
@@ -158,7 +150,7 @@ export async function listOrders({
 
   return {
     orders: nodes.map((order) =>
-      shapeOrder(order, byOrderId.get(order.id), defaultWeightGrams, codKeywords),
+      shapeOrder(order, byOrderId.get(order.id), defaultWeightGrams),
     ),
     pageInfo,
   };
@@ -171,7 +163,6 @@ export async function getOrder({
   storeId,
   orderId,
   defaultWeightGrams = 1000,
-  codKeywords = DEFAULT_COD_KEYWORDS,
 }) {
   const response = await admin.graphql(ORDER_BY_ID_QUERY, {
     variables: { id: orderId },
@@ -189,5 +180,5 @@ export async function getOrder({
     where: { storeId_shopifyOrderId: { storeId, shopifyOrderId: order.id } },
   });
 
-  return shapeOrder(order, shipment, defaultWeightGrams, codKeywords);
+  return shapeOrder(order, shipment, defaultWeightGrams);
 }

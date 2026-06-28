@@ -10,6 +10,7 @@ import { listShipments, cancelShipments } from "../services/shipment.server";
 import { getSettings } from "../services/settings.server";
 import { LeopardApiClient } from "../integrations/leopards/client.server";
 import { batchResolveCityNames } from "../services/city.server";
+import { restoreBrokenFulfillment } from "../services/booking.server";
 import db from "../db.server";
 
 // ── Loader / Action ───────────────────────────────────────────────────────────
@@ -24,11 +25,18 @@ export const loader = async ({ request }) => {
 
   const cutoff24h = new Date(Date.now() - 24 * 60 * 60 * 1000);
 
-  const [{ shipments, total, pageCount }, recentLoadsheets] = await Promise.all([
+  const [{ shipments, total, pageCount }, recentLoadsheets, brokenShipments] = await Promise.all([
     listShipments(store.id, "BOOKED", query, page, limit),
     db.loadsheet.findMany({
       where: { storeId: store.id, createdAt: { gte: cutoff24h } },
       orderBy: { createdAt: "desc" },
+      take: 50,
+    }),
+    db.shipment.findMany({
+      where: { storeId: store.id, shopifySyncBroken: true, shopifyDeletedAt: null,
+               status: { in: ["BOOKED", "IN_TRANSIT"] } },
+      select: { id: true, shopifyOrderId: true, shopifyOrderName: true, cnNumber: true, status: true },
+      orderBy: { updatedAt: "desc" },
       take: 50,
     }),
   ]);
@@ -43,6 +51,7 @@ export const loader = async ({ request }) => {
 
   return {
     query, page, pageCount, total, perPage: limit, cityNames,
+    brokenShipments,
     recentLoadsheets: recentLoadsheets.map((ls) => ({
       id:          ls.id,
       loadSheetId: ls.loadSheetId,
@@ -153,6 +162,18 @@ export const action = async ({ request }) => {
     return { ...await cancelShipments(store.id, cnNumbers, admin), intent };
   }
 
+  if (intent === "restoreFulfillment") {
+    const orderId = String(formData.get("orderId") ?? "");
+    return { ...await restoreBrokenFulfillment({ admin, storeId: store.id, orderId }), intent };
+  }
+
+  if (intent === "cancelBroken") {
+    const cnNumbers = String(formData.get("cnNumbers") ?? "")
+      .split(",").map((v) => v.trim()).filter(Boolean);
+    const result = await cancelShipments(store.id, cnNumbers, admin);
+    return { ...result, intent };
+  }
+
   return { ok: false, message: "Unknown action.", intent };
 };
 
@@ -211,7 +232,7 @@ function buildPageQuery({ query, page }) {
 export default function Shipments() {
   const {
     shipments, query, page, pageCount, total, perPage,
-    cityNames, recentLoadsheets,
+    cityNames, recentLoadsheets, brokenShipments,
   } = useLoaderData();
 
   const fetcher    = useFetcher();
@@ -270,7 +291,7 @@ export default function Shipments() {
       }
     }
 
-    if (fetcher.data.intent === "cancel" || fetcher.data.intent === "cancelBatch") {
+    if (fetcher.data.intent === "cancel" || fetcher.data.intent === "cancelBatch" || fetcher.data.intent === "cancelBroken") {
       if (fetcher.data.message) {
         shopify.toast.show(fetcher.data.message, { isError: !fetcher.data.ok });
       }
@@ -279,6 +300,13 @@ export default function Shipments() {
         if (fetcher.data.intent === "cancelBatch") { setSelectedCns(new Set()); setBatchCancelConfirm(false); }
         if (fetcher.data.intent === "cancel")      setCancelTarget(null);
       }
+    }
+
+    if (fetcher.data.intent === "restoreFulfillment") {
+      if (fetcher.data.message) {
+        shopify.toast.show(fetcher.data.message, { isError: !fetcher.data.ok });
+      }
+      if (fetcher.data.ok) revalidator.revalidate();
     }
   }, [fetcher.data, shopify]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -296,8 +324,66 @@ export default function Shipments() {
   const startCount = total === 0 ? 0 : (page - 1) * perPage + 1;
   const endCount   = Math.min(page * perPage, total);
 
+  const isRestoringFulfillment = fetcher.state !== "idle" && fetcher.formData?.get("intent") === "restoreFulfillment";
+  const isCancellingBroken    = fetcher.state !== "idle" && fetcher.formData?.get("intent") === "cancelBroken";
+
   return (
     <s-page heading="Shipments">
+
+      {/* ── shopifySyncBroken warning banner ── */}
+      {brokenShipments?.length > 0 && (
+        <s-section>
+          <div className="lb-alert lb-alert-warning" style={{ flexDirection: "column", alignItems: "stretch", gap: 0 }}>
+            <div style={{ fontWeight: 700, fontSize: 14, marginBottom: 8 }}>
+              ⚠ Shopify fulfillment removed — {brokenShipments.length} shipment{brokenShipments.length !== 1 ? "s" : ""} need attention
+            </div>
+            <p style={{ fontSize: 13, color: "#444750", margin: "0 0 12px" }}>
+              The Shopify fulfillment was cancelled externally while the Leopards CN is still active.
+              Choose an action for each shipment:
+            </p>
+            {brokenShipments.map((s) => (
+              <div key={s.id} style={{
+                display: "flex", alignItems: "center", gap: 12,
+                padding: "10px 0", borderTop: "1px solid #e8c97a", flexWrap: "wrap",
+              }}>
+                <div style={{ flex: 1, minWidth: 180 }}>
+                  <span style={{ fontWeight: 700, fontSize: 13 }}>{s.shopifyOrderName}</span>
+                  <span className="lb-mono" style={{ fontSize: 12, color: "#6d7175", marginLeft: 8 }}>{s.cnNumber}</span>
+                </div>
+                <div style={{ display: "flex", gap: 8 }}>
+                  <s-button
+                    size="slim"
+                    disabled={isRestoringFulfillment || isCancellingBroken}
+                    loading={isRestoringFulfillment && fetcher.formData?.get("orderId") === s.shopifyOrderId}
+                    onClick={() =>
+                      fetcher.submit(
+                        { intent: "restoreFulfillment", orderId: s.shopifyOrderId },
+                        { method: "post", action: "/app/shipments" },
+                      )
+                    }
+                  >
+                    Restore Shopify fulfillment
+                  </s-button>
+                  <s-button
+                    size="slim"
+                    tone="critical"
+                    disabled={isRestoringFulfillment || isCancellingBroken}
+                    loading={isCancellingBroken && fetcher.formData?.get("cnNumbers") === s.cnNumber}
+                    onClick={() =>
+                      fetcher.submit(
+                        { intent: "cancelBroken", cnNumbers: s.cnNumber },
+                        { method: "post", action: "/app/shipments" },
+                      )
+                    }
+                  >
+                    Cancel Leopards booking
+                  </s-button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </s-section>
+      )}
 
       {/* ── Cancel Modals ── */}
       {cancelTarget && (

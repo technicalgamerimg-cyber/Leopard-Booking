@@ -79,6 +79,7 @@ export async function listEligibleShipmentsForLoadsheet(storeId) {
   return db.shipment.findMany({
     where: {
       storeId,
+      shopifyDeletedAt: null,
       cnNumber: { not: null },
       status:   { notIn: ["CANCELLED", "DELIVERED", "RETURNED"] },
     },
@@ -90,7 +91,7 @@ export async function listEligibleShipmentsForLoadsheet(storeId) {
 
 export async function getShipmentById(storeId, shipmentId) {
   return db.shipment.findFirst({
-    where:   { id: shipmentId, storeId },
+    where:   { id: shipmentId, storeId, shopifyDeletedAt: null },
     include: { logs: { orderBy: { createdAt: "desc" } } },
   });
 }
@@ -116,22 +117,22 @@ export async function purgeOldLogs({ apiLogDays = 30, webhookLogDays = 30 } = {}
  * @param {object} admin  - Shopify Admin API client (from authenticate.admin)
  * @param {string} shopifyOrderId - e.g. "gid://shopify/Order/12345"
  */
+// Returns { ok: boolean } — never throws.
 export async function cancelFulfillmentInShopify(admin, shopifyOrderId) {
   try {
-    // 1. Fetch active fulfillments for the order
     const foRes = await admin.graphql(GET_ORDER_FULFILLMENTS_QUERY, {
       variables: { orderId: shopifyOrderId },
     });
     const foJson = await foRes.json();
     const fulfillments = foJson.data?.order?.fulfillments ?? [];
 
-    // Only touch fulfillments that are still active (SUCCESS = fulfilled but not yet cancelled)
     const activeFulfillments = fulfillments.filter(
       (f) => f.status === "SUCCESS" || f.status === "OPEN",
     );
 
+    let allOk = true;
     for (const fulfillment of activeFulfillments) {
-      // Step A: Clear tracking info first
+      // Step A: Clear tracking info
       try {
         const trackRes = await admin.graphql(FULFILLMENT_TRACKING_UPDATE_MUTATION, {
           variables: {
@@ -140,7 +141,7 @@ export async function cancelFulfillmentInShopify(admin, shopifyOrderId) {
             notifyCustomer:   false,
           },
         });
-        const trackJson = await trackRes.json();
+        const trackJson   = await trackRes.json();
         const trackErrors = trackJson.data?.fulfillmentTrackingInfoUpdateV2?.userErrors ?? [];
         if (trackErrors.length) {
           console.warn("[cancelFulfillmentInShopify] tracking clear errors:", JSON.stringify(trackErrors));
@@ -149,25 +150,28 @@ export async function cancelFulfillmentInShopify(admin, shopifyOrderId) {
         console.warn("[cancelFulfillmentInShopify] tracking clear failed:", trackErr?.message);
       }
 
-      // Step B: Cancel the fulfillment
+      // Step B: Cancel fulfillment
       try {
-        const cancelRes = await admin.graphql(FULFILLMENT_CANCEL_MUTATION, {
+        const cancelRes    = await admin.graphql(FULFILLMENT_CANCEL_MUTATION, {
           variables: { id: fulfillment.id },
         });
-        const cancelJson = await cancelRes.json();
+        const cancelJson   = await cancelRes.json();
         const cancelErrors = cancelJson.data?.fulfillmentCancel?.userErrors ?? [];
         if (cancelErrors.length) {
           console.warn("[cancelFulfillmentInShopify] cancel errors:", JSON.stringify(cancelErrors));
+          allOk = false;
         } else {
           console.log(`[cancelFulfillmentInShopify] Cancelled fulfillment ${fulfillment.id} for order ${shopifyOrderId}`);
         }
       } catch (cancelErr) {
         console.warn("[cancelFulfillmentInShopify] cancel failed:", cancelErr?.message);
+        allOk = false;
       }
     }
+    return { ok: allOk };
   } catch (err) {
-    // Never throw — fulfillment writeback failure must not block the app cancel flow
     console.error("[cancelFulfillmentInShopify] Unexpected error:", err?.message);
+    return { ok: false };
   }
 }
 
@@ -239,14 +243,31 @@ export async function cancelShipments(storeId, cnNumbers, admin = null) {
   ]);
 
   // ── Shopify fulfillment writeback (non-fatal, parallel) ──────────────────────
-  // When admin is provided (route context), cancel Shopify fulfillments + clear tracking.
-  // When absent (webhook context), skip silently.
   if (admin) {
-    await Promise.allSettled(
-      cancellableShipments.map((s) =>
-        cancelFulfillmentInShopify(admin, s.shopifyOrderId),
-      ),
+    const writebackResults = await Promise.allSettled(
+      cancellableShipments.map((s) => cancelFulfillmentInShopify(admin, s.shopifyOrderId)),
     );
+
+    const RETRY_15_MIN = new Date(Date.now() + 15 * 60 * 1000);
+    const updatePromises = [];
+    for (let i = 0; i < cancellableShipments.length; i++) {
+      const s      = cancellableShipments[i];
+      const result = writebackResults[i];
+      const wbOk   = result.status === "fulfilled" && result.value?.ok !== false;
+      if (!wbOk) {
+        updatePromises.push(
+          db.shipment.update({
+            where: { id: s.id },
+            data:  {
+              shopifySyncStatus: "CANCEL_FAILED",
+              shopifyRetryCount: (s.shopifyRetryCount ?? 0) + 1,
+              shopifyRetryAfter: RETRY_15_MIN,
+            },
+          }).catch((e) => console.error("[cancelShipments] CANCEL_FAILED update error:", e.message)),
+        );
+      }
+    }
+    if (updatePromises.length) await Promise.allSettled(updatePromises);
   }
 
   return {
@@ -346,6 +367,7 @@ const VISIBLE_STATUSES = ["BOOKED", "IN_TRANSIT", "DELIVERED", "RETURNED"];
 function buildWhere(storeId, status, query) {
   return {
     storeId,
+    shopifyDeletedAt: null,
     status: status && VISIBLE_STATUSES.includes(status)
       ? status
       : { in: VISIBLE_STATUSES },

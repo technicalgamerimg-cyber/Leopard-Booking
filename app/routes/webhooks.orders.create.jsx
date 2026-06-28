@@ -1,7 +1,6 @@
 import { authenticate } from "../shopify.server";
 import db from "../db.server";
-import { getCodKeywords } from "../services/settings.server";
-import { calculateCodAmount } from "../lib/cod.server";
+import { codFromFinancialStatus } from "../lib/cod.server";
 import { withWebhookDedup } from "../lib/webhook-dedup.server";
 
 export const action = async ({ request }) => {
@@ -15,14 +14,13 @@ export const action = async ({ request }) => {
     if (!store) return new Response("OK", { status: 200 });
 
     await withWebhookDedup(store.id, topic, payload, async () => {
-      const order           = payload;
-      const shopifyOrderId  = `gid://shopify/Order/${order.id}`;
-      const codKeywords     = getCodKeywords(store.settings);
-      const codAmount       = calculateCodAmount(
-        order.payment_gateway_names,
-        order.current_total_price ?? order.total_price,
-        codKeywords,
-      );
+      const order          = payload;
+      const shopifyOrderId = `gid://shopify/Order/${order.id}`;
+
+      // financialStatus from Shopify is uppercase (PAID, PENDING, etc.)
+      const financialStatus = (order.financial_status ?? "PENDING").toUpperCase();
+      const totalPrice      = Math.round(parseFloat(order.current_total_price ?? order.total_price ?? "0") || 0);
+      const codAmount       = codFromFinancialStatus(financialStatus, totalPrice);
 
       const addr = order.shipping_address ?? order.billing_address;
 
@@ -32,6 +30,11 @@ export const action = async ({ request }) => {
           storeId:          store.id,
           shopifyOrderId,
           shopifyOrderName: order.name,
+          shopifyCreatedAt: order.created_at ? new Date(order.created_at) : new Date(),
+          financialStatus,
+          totalPrice,
+          note:             order.note ?? null,
+          lineItemsCount:   order.line_items?.length ?? 1,
           status:           "PENDING",
           codAmount,
           weightGrams:      store.settings?.defaultWeightGrams ?? 1000,
@@ -41,7 +44,7 @@ export const action = async ({ request }) => {
             .filter(Boolean)
             .join(", "),
         },
-        update: {}, // never overwrite an existing record's data from this webhook
+        update: {}, // never overwrite an existing record from this webhook
       });
     });
   } catch (err) {

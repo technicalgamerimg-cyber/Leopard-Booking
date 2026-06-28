@@ -31,6 +31,7 @@ export async function generateLoadsheet(storeId, cnNumbers) {
   const shipments = await db.shipment.findMany({
     where: {
       storeId,
+      shopifyDeletedAt: null,
       cnNumber: { in: cnNumbers },
       status:   { notIn: ["CANCELLED", "DELIVERED", "RETURNED"] },
     },

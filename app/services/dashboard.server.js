@@ -5,21 +5,21 @@ export async function getDashboard(storeId) {
   const todayStart = new Date();
   todayStart.setHours(0, 0, 0, 0);
 
-  const [shipments, awaitingBooking, failedBookings, bookedToday, recentLogs, settings] =
+  const [shipments, awaitingBooking, failedBookings, bookedToday, recentLogs, settings, cancelledToday, bookedAllTime] =
     await Promise.all([
       db.shipment.groupBy({
         by: ["status"],
-        where: { storeId },
+        where: { storeId, shopifyDeletedAt: null },
         _count: { _all: true },
       }),
       db.shipment.count({
-        where: { storeId, status: "PENDING", cnNumber: null, lastError: null },
+        where: { storeId, shopifyDeletedAt: null, status: "PENDING", cnNumber: null, lastError: null },
       }),
       db.shipment.count({
-        where: { storeId, status: "PENDING", lastError: { not: null } },
+        where: { storeId, shopifyDeletedAt: null, status: "PENDING", lastError: { not: null } },
       }),
       db.shipment.count({
-        where: { storeId, status: "BOOKED", bookedAt: { gte: todayStart } },
+        where: { storeId, shopifyDeletedAt: null, status: "BOOKED", bookedAt: { gte: todayStart } },
       }),
       db.shipmentLog.findMany({
         where: { shipment: { storeId } },
@@ -34,6 +34,12 @@ export async function getDashboard(storeId) {
         take: 8,
       }),
       getSettings(storeId),
+      db.shipment.count({
+        where: { storeId, shopifyDeletedAt: null, status: "CANCELLED", cancelledAt: { gte: todayStart } },
+      }),
+      db.shipment.count({
+        where: { storeId, shopifyDeletedAt: null, bookedAt: { not: null } },
+      }),
     ]);
 
   const counts = {
@@ -57,6 +63,8 @@ export async function getDashboard(storeId) {
     awaitingBooking,
     failedBookings,
     bookedToday,
+    cancelledToday,
+    bookedAllTime,
     hasCredentials: Boolean(settings.hasCredentials),
     hasOriginCity: Boolean(settings.originCityId),
     recentLogs: recentLogs.map((log) => ({

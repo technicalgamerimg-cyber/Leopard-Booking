@@ -6,6 +6,8 @@ import { isTerminal, canTransition } from "../lib/shipment-state-machine.server"
 import { withWebhookDedup } from "../lib/webhook-dedup.server";
 import { cancelFulfillmentInShopify } from "../services/shipment.server";
 
+const LOCK_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
+
 export const action = async ({ request }) => {
   const { shop, topic, payload } = await authenticate.webhook(request);
 
@@ -20,15 +22,36 @@ export const action = async ({ request }) => {
         where: { storeId_shopifyOrderId: { storeId: store.id, shopifyOrderId } },
       });
 
-      // State machine: terminal statuses are immutable
       if (!shipment || isTerminal(shipment.status)) return;
 
-      // Verify transition is valid
+      // If a booking is in flight (lock is active), defer the cancellation.
+      // The booking service checks pendingCancellation after committing and cancels immediately.
+      const isLockActive = shipment.bookingLockedAt &&
+        (Date.now() - new Date(shipment.bookingLockedAt).getTime()) < LOCK_TIMEOUT_MS;
+
+      if (isLockActive) {
+        await db.shipment.update({
+          where: { id: shipment.id },
+          data:  { pendingCancellation: true },
+        });
+        await db.shipmentLog.create({
+          data: {
+            shipmentId: shipment.id,
+            eventType:  "PENDING_CANCELLATION_SET",
+            fromStatus: shipment.status,
+            toStatus:   shipment.status,
+            message:    "Shopify order cancelled while booking was in flight; will cancel after booking commits.",
+          },
+        });
+        return; // Always return 200 — dedup hash recorded; booking service takes over
+      }
+
       if (!canTransition(shipment.status, "CANCELLED")) {
-        console.warn(`[webhook] orders/cancelled: cannot cancel from ${shipment.status} for ${shopifyOrderId}`);
+        console.warn(`[webhook] orders/cancelled: invalid transition from ${shipment.status} for ${shopifyOrderId}`);
         return;
       }
 
+      // Cancel with Leopards if the order was already booked
       let cancelMessage = "Order cancelled in Shopify; shipment was not yet booked with Leopards.";
       const isBooked = shipment.cnNumber &&
         (shipment.status === "BOOKED" || shipment.status === "IN_TRANSIT");
@@ -54,7 +77,7 @@ export const action = async ({ request }) => {
       await db.$transaction([
         db.shipment.update({
           where: { id: shipment.id },
-          data:  { status: "CANCELLED", cancelledAt: new Date() },
+          data:  { status: "CANCELLED", cancelledAt: new Date(), pendingCancellation: false },
         }),
         db.shipmentLog.create({
           data: {
@@ -67,8 +90,8 @@ export const action = async ({ request }) => {
         }),
       ]);
 
-      // Cancel the Shopify fulfillment so tracking is cleared from the order.
-      // Non-fatal: failure here must not affect the 200 response to Shopify.
+      // Cancel Shopify fulfillment so the order shows as unfulfilled.
+      // Non-fatal: failure here must not affect the 200 response.
       try {
         const { admin } = await unauthenticated.admin(shop);
         await cancelFulfillmentInShopify(admin, shopifyOrderId);
